@@ -1822,6 +1822,77 @@ app.get(
         return null;
       }
     };
+
+    // Optional mapping:
+    // Some workspaces keep the human-readable Product "ID" (Notion unique_id)
+    // inside the Products_list database (ordersDatabaseId), not inside
+    // Products_Database itself.
+    //
+    // We build a map: { productPageId -> products_list.ID }
+    // by scanning Products_list pages and reading:
+    // - relation property: "Product" -> page id in Products_Database
+    // - unique id property: "ID" -> e.g. ORD-86
+    const productIdToProductsListId = new Map();
+    if (ordersDatabaseId) {
+      try {
+        let hasMoreList = true;
+        let startCursorList = undefined;
+
+        while (hasMoreList) {
+          let respList;
+          try {
+            // Fast path: only records that have Product relation
+            respList = await notion.databases.query({
+              database_id: ordersDatabaseId,
+              start_cursor: startCursorList,
+              page_size: 100,
+              filter: {
+                property: 'Product',
+                relation: { is_not_empty: true },
+              },
+              sorts: [{ timestamp: 'created_time', direction: 'descending' }],
+            });
+          } catch (e) {
+            // If the filter fails (e.g. property name differs), retry without it
+            respList = await notion.databases.query({
+              database_id: ordersDatabaseId,
+              start_cursor: startCursorList,
+              page_size: 100,
+              sorts: [{ timestamp: 'created_time', direction: 'descending' }],
+            });
+          }
+
+          for (const pg of respList.results || []) {
+            const props = pg.properties || {};
+            const prodRelProp = getPropInsensitive(props, 'Product');
+            const rel = prodRelProp?.relation;
+            if (!Array.isArray(rel) || rel.length === 0) continue;
+            const prodId = rel[0]?.id;
+            if (!prodId) continue;
+
+            const idProp = getPropInsensitive(props, 'ID');
+            const idText = extractUniqueIdText(idProp);
+            if (!idText) continue;
+
+            // Keep first encountered (we query newest first)
+            if (!productIdToProductsListId.has(prodId)) {
+              productIdToProductsListId.set(prodId, idText);
+            }
+          }
+
+          hasMoreList = !!respList.has_more;
+          startCursorList = respList.next_cursor;
+
+          // Safety valve for very large DBs
+          if (productIdToProductsListId.size > 5000) break;
+        }
+      } catch (e) {
+        console.warn(
+          '[api/components] Could not build Products_list ID map:',
+          e?.body || e?.message || e,
+        );
+      }
+    }
     try {
       while (hasMore) {
         const response = await notion.databases.query({
@@ -1839,9 +1910,15 @@ app.get(
               getPropInsensitive(page.properties, 'Unit price');
             const unitPrice = extractNumber(unitPriceProp);
 
-            // Display ID inside the product icon (Notion property type: ID / unique_id)
+            // Display ID inside the product icon.
+            // Priority:
+            // 1) Products_list "ID" (if a mapping exists for this product)
+            // 2) Products_Database "ID" (fallback)
+            const displayIdFromProductsList =
+              productIdToProductsListId.get(page.id) || null;
             const displayIdProp = getPropInsensitive(page.properties, 'ID');
-            const displayId = extractUniqueIdText(displayIdProp);
+            const displayIdFromProductsDb = extractUniqueIdText(displayIdProp);
+            const displayId = displayIdFromProductsList || displayIdFromProductsDb;
 
             // Optional image (if exists in DB). We support several common property names.
             const imageProp =
