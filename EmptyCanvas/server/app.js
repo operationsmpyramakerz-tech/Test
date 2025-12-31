@@ -1672,9 +1672,69 @@ app.get(
     const extractNumber = (prop) => {
       try {
         if (!prop) return null;
+
+        // Some Notion setups store currency/price as text (e.g. "£40.00")
+        // and/or rollup arrays of text values. We try to parse a number from
+        // those cases so the UI doesn't show $0.
+        const parseNumberFromText = (text) => {
+          if (text == null) return null;
+          let s = String(text).trim();
+          if (!s) return null;
+          // Remove spaces
+          s = s.replace(/\s+/g, '');
+          // If both comma and dot exist: assume comma is thousands separator
+          if (s.includes('.') && s.includes(',')) {
+            s = s.replace(/,/g, '');
+          } else if (!s.includes('.') && s.includes(',')) {
+            // If only comma exists: assume comma is decimal separator (e.g. 40,00)
+            const last = s.lastIndexOf(',');
+            s = s.slice(0, last).replace(/,/g, '') + '.' + s.slice(last + 1);
+          }
+          // Keep digits, sign and dot only
+          s = s.replace(/[^0-9+\-\.]/g, '');
+          if (!s || s === '.' || s === '+' || s === '-') return null;
+          const n = Number(s);
+          return Number.isFinite(n) ? n : null;
+        };
+
+        const extractFromValue = (val) => {
+          try {
+            if (!val) return null;
+            if (val.type === 'number') return val.number ?? null;
+            if (val.type === 'formula') {
+              if (val.formula?.type === 'number') return val.formula?.number ?? null;
+              if (val.formula?.type === 'string') return parseNumberFromText(val.formula?.string);
+              return null;
+            }
+            if (val.type === 'rich_text') {
+              const t = (val.rich_text || []).map((x) => x?.plain_text || '').join('');
+              return parseNumberFromText(t);
+            }
+            if (val.type === 'title') {
+              const t = (val.title || []).map((x) => x?.plain_text || '').join('');
+              return parseNumberFromText(t);
+            }
+            if (val.type === 'select') return parseNumberFromText(val.select?.name);
+            if (val.type === 'status') return parseNumberFromText(val.status?.name);
+            return null;
+          } catch {
+            return null;
+          }
+        };
+
         if (prop.type === 'number') return prop.number ?? null;
         if (prop.type === 'formula') {
-          return prop.formula?.type === 'number' ? (prop.formula?.number ?? null) : null;
+          if (prop.formula?.type === 'number') return prop.formula?.number ?? null;
+          if (prop.formula?.type === 'string') return parseNumberFromText(prop.formula?.string);
+          return null;
+        }
+        if (prop.type === 'rich_text') {
+          const t = (prop.rich_text || []).map((x) => x?.plain_text || '').join('');
+          return parseNumberFromText(t);
+        }
+        if (prop.type === 'title') {
+          const t = (prop.title || []).map((x) => x?.plain_text || '').join('');
+          return parseNumberFromText(t);
         }
         if (prop.type === 'rollup') {
           const r = prop.rollup;
@@ -1683,15 +1743,10 @@ app.get(
           if (r.type === 'array') {
             // Some rollups return an array. Try:
             // - sum numbers
-            // - first number
+            // - parse numbers from text
             const arr = Array.isArray(r.array) ? r.array : [];
             const nums = arr
-              .map((x) => {
-                if (!x) return null;
-                if (x.type === 'number') return x.number ?? null;
-                if (x.type === 'formula' && x.formula?.type === 'number') return x.formula?.number ?? null;
-                return null;
-              })
+              .map((x) => extractFromValue(x))
               .filter((n) => typeof n === 'number' && Number.isFinite(n));
             if (nums.length === 0) return null;
             return nums.reduce((a, b) => a + b, 0);
@@ -1835,6 +1890,15 @@ app.post(
         .status(500)
         .json({ success: false, message: "Database IDs are not configured." });
     }
+      // Password confirmation (requested): user must enter their password
+      // again before submitting an order.
+      const password = String(req.body?.password || "").trim();
+      if (!password) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Password is required before checkout." });
+      }
+
 let { products } = req.body || {};
 if (!Array.isArray(products) || products.length === 0) {
   const d = req.session.orderDraft;
@@ -1870,7 +1934,15 @@ if (cleanedProducts.some(p => !p.reason)) {
       if (userQuery.results.length === 0) {
         return res.status(404).json({ error: "User not found." });
       }
-      const userId = userQuery.results[0].id;
+      const userPage = userQuery.results[0];
+      const userId = userPage.id;
+
+      const storedPassword = userPage?.properties?.Password?.number;
+      if (!storedPassword || String(storedPassword) !== password) {
+        return res
+          .status(401)
+          .json({ success: false, message: "Invalid password. Please try again." });
+      }
 
       const creations = await Promise.all(
   cleanedProducts.map(async (product) => {
