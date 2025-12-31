@@ -456,11 +456,8 @@ app.get(
   requireAuth,
   requirePage("Create New Order"),
   (req, res) => {
-    const d = req.session.orderDraft || {};
-    if (!Array.isArray(d.products) || d.products.length === 0) {
-      return res.redirect("/orders/new/products");
-    }
-    res.sendFile(path.join(__dirname, "..", "public", "create-order-review.html"));
+    // Review step removed — Checkout now submits directly from Products page
+    return res.redirect("/orders/new/products");
   },
 );
 
