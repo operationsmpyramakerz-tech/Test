@@ -11,7 +11,8 @@
 <!-- Create New Order (Products) — Shopping Cart UI -->
 <style>
   .create-order-cart-wrap{
-    max-width: 1120px;
+    /* Full width inside main content (avoid the 2-column .container grid) */
+    max-width: 100%;
     margin: 0 auto;
     padding: 1.5rem 1rem;
   }
@@ -200,11 +201,13 @@
     color: #0f172a;
     margin-bottom: 0.85rem;
   }
+  /* Password (was voucher) — should appear UNDER Total */
   .voucher-row{
     display: flex;
     gap: 0.6rem;
     align-items: center;
-    margin-bottom: 1rem;
+    margin-top: 1rem;
+    margin-bottom: 0;
   }
   .voucher-row input{
     flex: 1;
@@ -218,17 +221,7 @@
     border-color: #94a3b8;
     box-shadow: 0 0 0 4px rgba(148, 163, 184, 0.25);
   }
-  .apply-btn{
-    height: 40px;
-    padding: 0 1.15rem;
-    border-radius: 999px;
-    border: 1px solid #e5e7eb;
-    background: #fff;
-    font-weight: 800;
-    cursor: pointer;
-    color: #0f172a;
-  }
-  .apply-btn:hover{ background: #f8fafc; }
+  /* apply button removed */
 
   .summary-lines{
     display: flex;
@@ -252,16 +245,7 @@
     color: #0f172a;
   }
 
-  .summary-note{
-    display:flex;
-    gap: 10px;
-    align-items:flex-start;
-    color: #64748b;
-    font-size: 0.86rem;
-    margin-top: 0.9rem;
-    line-height: 1.25;
-  }
-  .summary-note i{ margin-top: 2px; }
+  /* Warranty note removed */
 
   .checkout-btn{
     width: 100%;
@@ -485,7 +469,8 @@
     </header>
 
     <!-- Shopping Cart UI (New Design) -->
-    <main class="container create-order-cart-wrap">
+    <!-- Use container-full-width so the cart is not forced into a 2-column grid -->
+    <main class="container-full-width create-order-cart-wrap">
             <div class="cart-grid">
         <!-- Cart (left) -->
         <section class="cart">
@@ -512,21 +497,14 @@
           <div class="summary-card">
             <div class="summary-title">Order Summary</div>
 
-            <div class="voucher-row">
-              <input id="voucherInput" placeholder="Discount voucher" type="text"/>
-              <button class="apply-btn" id="applyVoucherBtn" type="button">Apply</button>
-            </div>
-
             <div class="summary-lines">
               <div class="summary-line"><span>Sub Total</span><span class="val" id="summarySubTotal">—</span></div>
-              <div class="summary-line"><span id="summaryDiscountLabel">Discount</span><span class="val" id="summaryDiscount">—</span></div>
-              <div class="summary-line"><span>Delivery fee</span><span class="val" id="summaryDelivery">—</span></div>
               <div class="summary-line summary-total"><span>Total</span><span class="val" id="summaryTotal">—</span></div>
             </div>
 
-            <div class="summary-note">
-              <i data-feather="shield"></i>
-              <span>90 Day Limited Warranty against manufacturer's defects. Details</span>
+            <!-- Password required to checkout (requested: under Total) -->
+            <div class="voucher-row">
+              <input id="voucherInput" placeholder="Discount voucher (your password)" type="password" autocomplete="current-password"/>
             </div>
 
             <button class="checkout-btn" id="checkoutBtn" type="button">Checkout Now</button>
