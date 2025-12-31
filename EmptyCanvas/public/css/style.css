@@ -3591,3 +3591,331 @@ body.sidebar-mini .sidebar-footer .account-mini .label{
   .acc-edit-actions{ flex-direction: column; }
   .acc-edit-btn{ width: 100%; }
 }
+
+
+/* =========================================================
+   Current Orders — card layout (requested to match ref image #1)
+   Scoped to #current-orders only.
+   ========================================================= */
+#current-orders .co-grid{
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14px;
+}
+@media (min-width: 720px){
+  #current-orders .co-grid{
+    grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+  }
+}
+
+#current-orders .co-card{
+  background: #ffffff;
+  border: 1px solid #E5E7EB;
+  border-radius: 18px;
+  padding: 14px;
+  box-shadow: 0 10px 24px rgba(0,0,0,.06);
+  cursor: pointer;
+  transition: transform .12s ease, box-shadow .12s ease;
+}
+#current-orders .co-card:hover{
+  transform: translateY(-2px);
+  box-shadow: 0 16px 30px rgba(0,0,0,.08);
+}
+#current-orders .co-card:focus-visible{
+  outline: 3px solid rgba(37, 99, 235, 0.25);
+  outline-offset: 2px;
+}
+
+#current-orders .co-row{
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+#current-orders .co-thumb{
+  width: 76px;
+  height: 76px;
+  border-radius: 16px;
+  overflow: hidden;
+  background: #F3F4F6;
+  border: 1px solid #E5E7EB;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+#current-orders .co-thumb img{
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+#current-orders .co-thumb-text{
+  font-weight: 900;
+  color: #374151;
+}
+
+#current-orders .co-info{
+  flex: 1;
+  min-width: 0;
+}
+#current-orders .co-title{
+  font-weight: 900;
+  font-size: 1rem;
+  color: #111827;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#current-orders .co-meta{
+  margin-top: 4px;
+  font-size: .85rem;
+  color: #6B7280;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#current-orders .co-product{
+  margin-top: 10px;
+  font-weight: 800;
+  color: #111827;
+  overflow-wrap: anywhere;
+}
+#current-orders .co-more{
+  display: inline-block;
+  margin-left: 8px;
+  font-size: .85rem;
+  color: #6B7280;
+  font-weight: 700;
+}
+
+#current-orders .co-count{
+  margin-left: auto;
+  font-weight: 900;
+  color: #111827;
+  opacity: .8;
+  flex-shrink: 0;
+}
+
+#current-orders .co-sep{
+  height: 1px;
+  background: #F3F4F6;
+  margin: 12px 0;
+}
+
+#current-orders .co-bottom{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+#current-orders .co-total-label{
+  font-size: .85rem;
+  color: #6B7280;
+}
+#current-orders .co-total-value{
+  font-size: 1.25rem;
+  font-weight: 950;
+  color: #111827;
+}
+
+#current-orders .co-status-btn{
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: #111827;
+  color: #ffffff;
+  font-weight: 900;
+  font-size: .9rem;
+  white-space: nowrap;
+}
+#current-orders .co-status-btn.is-done{
+  background: #16A34A;
+}
+
+/* =========================================================
+   Tracking page — requested layout to match ref image #2
+   Scoped to .tracking-page only.
+   ========================================================= */
+.tracking-page .tracking-shell{
+  max-width: 620px;
+  margin: 0 auto;
+  padding: 10px 0 20px;
+}
+
+.tracking-page .tracking-back{
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 999px;
+  border: 1px solid #E5E7EB;
+  background: #fff;
+  font-weight: 800;
+  color: #111827;
+  text-decoration: none;
+}
+.tracking-page .tracking-back:hover{
+  background: #F9FAFB;
+}
+
+.tracking-page .trk-card{
+  margin-top: 12px;
+  background: #ffffff;
+  border: 1px solid #E5E7EB;
+  border-radius: 22px;
+  padding: 22px 20px;
+  box-shadow: 0 12px 28px rgba(0,0,0,.08);
+}
+
+.tracking-page .trk-title{
+  font-size: 44px;
+  line-height: 1.05;
+  font-weight: 950;
+  color: #111827;
+  margin: 0;
+}
+.tracking-page .trk-sub{
+  margin-top: 8px;
+  font-size: 20px;
+  color: #6B7280;
+}
+
+/* Progress pill */
+.tracking-page .trk-pill{
+  margin: 26px 0 22px;
+  background: #111827;
+  border-radius: 999px;
+  padding: 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.tracking-page .trk-step{
+  width: 64px;
+  height: 64px;
+  border-radius: 999px;
+  background: rgba(255,255,255,.18);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.tracking-page .trk-step svg{
+  width: 26px;
+  height: 26px;
+}
+.tracking-page .trk-step.active{
+  background: #D6F25E; /* close to reference green */
+}
+.tracking-page .trk-step.active svg{
+  stroke: #111827;
+}
+
+.tracking-page .trk-connector{
+  flex: 1;
+  height: 12px;
+  border-radius: 999px;
+  background: rgba(255,255,255,.18);
+}
+.tracking-page .trk-connector.active{
+  background: #D6F25E;
+}
+
+/* ETA */
+.tracking-page .trk-eta-label{
+  margin-top: 8px;
+  font-size: 18px;
+  color: #6B7280;
+}
+.tracking-page .trk-eta{
+  margin-top: 8px;
+  font-size: 60px;
+  line-height: 1;
+  font-weight: 950;
+  color: #111827;
+  letter-spacing: 1px;
+}
+
+/* Optional details list */
+.tracking-page .trk-details{
+  margin-top: 18px;
+  display: grid;
+  gap: 10px;
+}
+.tracking-page .trk-detail-row{
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid #F3F4F6;
+  background: #FAFAFA;
+  border-radius: 14px;
+}
+.tracking-page .trk-detail-row span{
+  color: #6B7280;
+  font-weight: 700;
+}
+.tracking-page .trk-detail-row strong{
+  color: #111827;
+  font-weight: 900;
+  text-align: right;
+}
+
+/* Items list */
+.tracking-page .trk-items{
+  margin-top: 14px;
+  display: grid;
+  gap: 10px;
+}
+.tracking-page .trk-item{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid #F3F4F6;
+  border-radius: 16px;
+  background: #fff;
+}
+.tracking-page .trk-item .name{
+  font-weight: 900;
+  color: #111827;
+  overflow-wrap: anywhere;
+}
+.tracking-page .trk-item .meta{
+  margin-top: 2px;
+  color: #6B7280;
+  font-weight: 700;
+  font-size: .9rem;
+}
+.tracking-page .trk-pill-status{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 12px;
+  border-radius: 999px;
+  font-weight: 900;
+  font-size: .85rem;
+  border: 1px solid #E5E7EB;
+  background: #F3F4F6;
+  color: #111827;
+  white-space: nowrap;
+}
+.tracking-page .trk-pill-status.ok{
+  background: #DCFCE7;
+  border-color: #86EFAC;
+  color: #166534;
+}
+.tracking-page .trk-pill-status.wait{
+  background: #FEF3C7;
+  border-color: #FDE68A;
+  color: #92400E;
+}
+
+@media (max-width: 520px){
+  .tracking-page .trk-title{ font-size: 36px; }
+  .tracking-page .trk-eta{ font-size: 52px; }
+  .tracking-page .trk-step{ width: 56px; height: 56px; }
+  .tracking-page .trk-pill{ padding: 14px; }
+}
