@@ -413,6 +413,10 @@ app.get("/orders", requireAuth, requirePage("Current Orders"), (req, res) => {
   res.sendFile(path.join(__dirname, "..", "public", "current-orders.html"));
 });
 
+app.get("/orders/tracking", requireAuth, requirePage("Current Orders"), (req, res) => {
+  res.sendFile(path.join(__dirname, "..", "public", "order-tracking.html"));
+});
+
 app.get(
   "/orders/requested",
   requireAuth,
@@ -745,16 +749,78 @@ app.get(
         });
 
         for (const page of response.results) {
-          const productRelation = page.properties.Product?.relation;
+                    const productRelation = page.properties.Product?.relation;
           let productName = "Unknown Product";
+          let unitPrice = null;
+          let productImage = null;
+
+          // Helper to safely extract numbers from Notion props (number / formula / rollup / rich_text)
+          const parseNumberProp = (prop) => {
+            if (!prop) return null;
+            try {
+              if (prop.type === "number") return prop.number ?? null;
+
+              if (prop.type === "formula") {
+                if (prop.formula?.type === "number") return prop.formula.number ?? null;
+                if (prop.formula?.type === "string") {
+                  const n = parseFloat(String(prop.formula.string || "").replace(/[^0-9.]/g, ""));
+                  return Number.isFinite(n) ? n : null;
+                }
+              }
+
+              if (prop.type === "rollup") {
+                if (prop.rollup?.type === "number") return prop.rollup.number ?? null;
+
+                if (prop.rollup?.type === "array") {
+                  const arr = prop.rollup.array || [];
+                  for (const x of arr) {
+                    if (x.type === "number" && typeof x.number === "number") return x.number;
+                    if (x.type === "formula" && x.formula?.type === "number") return x.formula.number;
+                    if (x.type === "formula" && x.formula?.type === "string") {
+                      const n = parseFloat(String(x.formula.string || "").replace(/[^0-9.]/g, ""));
+                      if (Number.isFinite(n)) return n;
+                    }
+                    if (x.type === "rich_text") {
+                      const t = (x.rich_text || []).map(r => r.plain_text).join("").trim();
+                      const n = parseFloat(t.replace(/[^0-9.]/g, ""));
+                      if (Number.isFinite(n)) return n;
+                    }
+                  }
+                }
+              }
+
+              if (prop.type === "rich_text") {
+                const t = (prop.rich_text || []).map(r => r.plain_text).join("").trim();
+                const n = parseFloat(t.replace(/[^0-9.]/g, ""));
+                return Number.isFinite(n) ? n : null;
+              }
+            } catch {}
+            return null;
+          };
+
           if (productRelation && productRelation.length > 0) {
             try {
               const productPage = await notion.pages.retrieve({
                 page_id: productRelation[0].id,
               });
+
               productName =
                 productPage.properties?.Name?.title?.[0]?.plain_text ||
                 "Unknown Product";
+
+              // Price in Products_Database is a Number named "Unity Price"
+              unitPrice =
+                parseNumberProp(productPage.properties?.["Unity Price"]) ??
+                parseNumberProp(productPage.properties?.["Unit price"]) ??
+                parseNumberProp(productPage.properties?.["Unit Price"]) ??
+                parseNumberProp(productPage.properties?.["Price"]) ??
+                null;
+
+              // Use Notion cover/icon as a lightweight product image if present
+              if (productPage.cover?.type === "external") productImage = productPage.cover.external.url;
+              if (productPage.cover?.type === "file") productImage = productPage.cover.file.url;
+              if (!productImage && productPage.icon?.type === "external") productImage = productPage.icon.external.url;
+              if (!productImage && productPage.icon?.type === "file") productImage = productPage.icon.file.url;
             } catch (e) {
               console.error(
                 "Could not retrieve related product page:",
@@ -763,11 +829,13 @@ app.get(
             }
           }
 
-          allOrders.push({
+allOrders.push({
             id: page.id,
             reason:
               page.properties?.Reason?.title?.[0]?.plain_text || "No Reason",
             productName,
+            productImage,
+            unitPrice,
             quantity: page.properties?.["Quantity Requested"]?.number || 0,
             status:
               page.properties?.["Status"]?.select?.name || "Pending",
@@ -799,6 +867,237 @@ app.get(
     } catch (error) {
       console.error("Error fetching orders from Notion:", error.body || error);
       res.status(500).json({ error: "Failed to fetch orders from Notion." });
+    }
+  },
+);
+
+
+// Order Tracking (Current Orders) — fetch a whole "order group" by representative page id
+app.get(
+  "/api/orders/tracking",
+  requireAuth,
+  requirePage("Current Orders"),
+  async (req, res) => {
+    if (!ordersDatabaseId || !teamMembersDatabaseId) {
+      return res.status(500).json({ error: "Database IDs are not configured." });
+    }
+
+    const groupIdRaw = req.query.groupId;
+    if (!groupIdRaw || !looksLikeNotionId(groupIdRaw)) {
+      return res.status(400).json({ error: "Missing or invalid groupId." });
+    }
+    const groupId = toHyphenatedUUID(groupIdRaw);
+
+    res.set("Cache-Control", "no-store");
+
+    try {
+      // Find current user
+      const userQuery = await notion.databases.query({
+        database_id: teamMembersDatabaseId,
+        filter: { property: "Name", title: { equals: req.session.username } },
+      });
+      if (userQuery.results.length === 0) {
+        return res.status(404).json({ error: "User not found." });
+      }
+      const userId = userQuery.results[0].id;
+
+      // Retrieve a reference order page to extract the Reason/title
+      let basePage;
+      try {
+        basePage = await notion.pages.retrieve({ page_id: groupId });
+      } catch (e) {
+        return res.status(404).json({ error: "Order not found." });
+      }
+
+      // Ensure it belongs to the Orders DB (best-effort safety)
+      const parentDb = basePage.parent?.database_id;
+      if (parentDb && normalizeNotionId(parentDb) !== normalizeNotionId(ordersDatabaseId)) {
+        return res.status(404).json({ error: "Order not found." });
+      }
+
+      const reason =
+        basePage.properties?.Reason?.title?.[0]?.plain_text || "No Reason";
+
+      // Helpers
+      const parseNumberProp = (prop) => {
+        if (!prop) return null;
+        try {
+          if (prop.type === "number") return prop.number ?? null;
+
+          if (prop.type === "formula") {
+            if (prop.formula?.type === "number") return prop.formula.number ?? null;
+            if (prop.formula?.type === "string") {
+              const n = parseFloat(String(prop.formula.string || "").replace(/[^0-9.]/g, ""));
+              return Number.isFinite(n) ? n : null;
+            }
+          }
+
+          if (prop.type === "rollup") {
+            if (prop.rollup?.type === "number") return prop.rollup.number ?? null;
+
+            if (prop.rollup?.type === "array") {
+              const arr = prop.rollup.array || [];
+              for (const x of arr) {
+                if (x.type === "number" && typeof x.number === "number") return x.number;
+                if (x.type === "formula" && x.formula?.type === "number") return x.formula.number;
+                if (x.type === "formula" && x.formula?.type === "string") {
+                  const n = parseFloat(String(x.formula.string || "").replace(/[^0-9.]/g, ""));
+                  if (Number.isFinite(n)) return n;
+                }
+                if (x.type === "rich_text") {
+                  const t = (x.rich_text || []).map(r => r.plain_text).join("").trim();
+                  const n = parseFloat(t.replace(/[^0-9.]/g, ""));
+                  if (Number.isFinite(n)) return n;
+                }
+              }
+            }
+          }
+
+          if (prop.type === "rich_text") {
+            const t = (prop.rich_text || []).map(r => r.plain_text).join("").trim();
+            const n = parseFloat(t.replace(/[^0-9.]/g, ""));
+            return Number.isFinite(n) ? n : null;
+          }
+        } catch {}
+        return null;
+      };
+
+      const tryEtaProp = (prop) => {
+        if (!prop) return null;
+        try {
+          if (prop.type === "date") return prop.date?.start || null;
+          if (prop.type === "rich_text") {
+            const t = (prop.rich_text || []).map(r => r.plain_text).join("").trim();
+            return t || null;
+          }
+          if (prop.type === "formula") {
+            if (prop.formula?.type === "string") return prop.formula.string || null;
+            if (prop.formula?.type === "date") return prop.formula.date?.start || null;
+          }
+        } catch {}
+        return null;
+      };
+
+      const eta =
+        tryEtaProp(basePage.properties?.["Estimated delivery time"]) ??
+        tryEtaProp(basePage.properties?.["Estimated Delivery Time"]) ??
+        tryEtaProp(basePage.properties?.["ETA"]) ??
+        tryEtaProp(basePage.properties?.["Delivery time"]) ??
+        null;
+
+      // Collect all items for the same Reason (scoped to the current user)
+      const items = [];
+      let hasMore = true;
+      let startCursor = undefined;
+
+      const productCache = new Map();
+      async function getProductInfo(productPageId) {
+        if (!productPageId) return { name: "Unknown Product", unitPrice: null, image: null };
+        if (productCache.has(productPageId)) return productCache.get(productPageId);
+
+        try {
+          const productPage = await notion.pages.retrieve({ page_id: productPageId });
+          const name =
+            productPage.properties?.Name?.title?.[0]?.plain_text || "Unknown Product";
+
+          const unitPrice =
+            parseNumberProp(productPage.properties?.["Unity Price"]) ??
+            parseNumberProp(productPage.properties?.["Unit price"]) ??
+            parseNumberProp(productPage.properties?.["Unit Price"]) ??
+            parseNumberProp(productPage.properties?.["Price"]) ??
+            null;
+
+          let image = null;
+          if (productPage.cover?.type === "external") image = productPage.cover.external.url;
+          if (productPage.cover?.type === "file") image = productPage.cover.file.url;
+          if (!image && productPage.icon?.type === "external") image = productPage.icon.external.url;
+          if (!image && productPage.icon?.type === "file") image = productPage.icon.file.url;
+
+          const info = { name, unitPrice, image };
+          productCache.set(productPageId, info);
+          return info;
+        } catch (e) {
+          const info = { name: "Unknown Product", unitPrice: null, image: null };
+          productCache.set(productPageId, info);
+          return info;
+        }
+      }
+
+      while (hasMore) {
+        const response = await notion.databases.query({
+          database_id: ordersDatabaseId,
+          start_cursor: startCursor,
+          filter: {
+            and: [
+              { property: "Teams Members", relation: { contains: userId } },
+              { property: "Reason", title: { equals: reason } },
+            ],
+          },
+          sorts: [{ timestamp: "created_time", direction: "descending" }],
+        });
+
+        for (const page of response.results) {
+          const productRelation = page.properties.Product?.relation;
+          const productPageId =
+            productRelation && productRelation.length > 0
+              ? productRelation[0].id
+              : null;
+
+          const prod = await getProductInfo(productPageId);
+
+          items.push({
+            id: page.id,
+            productName: prod.name,
+            productImage: prod.image,
+            unitPrice: prod.unitPrice,
+            quantity: page.properties?.["Quantity Requested"]?.number || 0,
+            status: page.properties?.["Status"]?.select?.name || "Pending",
+            createdTime: page.created_time,
+          });
+        }
+
+        hasMore = response.has_more;
+        startCursor = response.next_cursor;
+      }
+
+      const st = (s) => String(s || "").toLowerCase();
+      const allReceived =
+        items.length > 0 && items.every((i) => st(i.status).includes("received"));
+
+      // Stage mapping (keeps UI consistent with your reference screenshots)
+      // 1: Order placed, 2: On the way, 3: Delivered
+      const stage = allReceived ? 3 : 2;
+
+      const headerTitle = stage === 3 ? "Delivered" : "On the way";
+      const headerSubtitle = stage === 3 ? "Your cargo has arrived." : "Your cargo is on delivery.";
+
+      const estimateTotal = items.reduce((sum, it) => {
+        const p = Number(it.unitPrice);
+        const q = Number(it.quantity);
+        if (!Number.isFinite(p) || !Number.isFinite(q)) return sum;
+        return sum + p * q;
+      }, 0);
+
+      const totalQty = items.reduce((sum, it) => sum + (Number(it.quantity) || 0), 0);
+
+      return res.json({
+        groupId,
+        reason,
+        createdTime: basePage.created_time,
+        stage,
+        headerTitle,
+        headerSubtitle,
+        eta,
+        totals: {
+          itemsCount: items.length,
+          totalQty,
+          estimateTotal,
+        },
+        items,
+      });
+    } catch (error) {
+      console.error("Error fetching tracking data:", error.body || error);
+      return res.status(500).json({ error: "Failed to fetch tracking data." });
     }
   },
 );
