@@ -23,23 +23,29 @@ document.addEventListener('DOMContentLoaded', function () {
   function displayOrders(orders) {
     if (!ordersListDiv) return;
     ordersListDiv.innerHTML = '';
+    ordersListDiv.classList.add('co-grid');
+
     if (!orders || orders.length === 0) {
+      ordersListDiv.classList.remove('co-grid');
       ordersListDiv.innerHTML = '<p>No orders found.</p>';
       return;
     }
 
-    // اجمع حسب السبب واحسب أحدث تاريخ لكل جروب
+    // Group orders by Reason (same behavior as before)
     const map = new Map();
     for (const o of orders) {
       const key = o.reason || 'No Reason';
       let g = map.get(key);
       if (!g) {
-        g = { reason: key, latestCreated: o.createdTime, products: [] };
+        g = { reason: key, latestCreated: o.createdTime, groupId: o.id, products: [] };
         map.set(key, g);
       }
       g.products.push(o);
+
+      // Keep the newest item as the "representative" group id for tracking
       if (!g.latestCreated || toDate(o.createdTime) > toDate(g.latestCreated)) {
         g.latestCreated = o.createdTime;
+        g.groupId = o.id;
       }
     }
 
@@ -47,17 +53,104 @@ document.addEventListener('DOMContentLoaded', function () {
       (a, b) => toDate(b.latestCreated) - toDate(a.latestCreated)
     );
 
+    const formatMoney = (value) => {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return '£0.00';
+      try {
+        return new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP' }).format(n);
+      } catch {
+        return `£${n.toFixed(2)}`;
+      }
+    };
+
+    const isReceived = (status) => norm(status).includes('received') && !norm(status).includes('not received');
+
+    function openTrackingPage(group) {
+      if (!group?.groupId) return;
+      window.location.href = `/orders/tracking?groupId=${encodeURIComponent(group.groupId)}`;
+    }
+
     const frag = document.createDocumentFragment();
+
     groups.forEach(group => {
-      const card = document.createElement('div');
-      card.className = 'order-card';
+      const itemsCount = group.products.length;
+      const totalQty = group.products.reduce((sum, p) => sum + (Number(p.quantity) || 0), 0);
+      const estimateTotal = group.products.reduce((sum, p) => {
+        const price = Number(p.unitPrice);
+        const qty = Number(p.quantity);
+        if (!Number.isFinite(price) || !Number.isFinite(qty)) return sum;
+        return sum + price * qty;
+      }, 0);
+
+      const allReceived = itemsCount > 0 && group.products.every(p => isReceived(p.status));
+      const statusText = allReceived ? 'Order Received' : 'On the way';
+
+      const preview =
+        group.products.find(p => p.productImage) ||
+        group.products[0] ||
+        {};
+
       const createdTime = new Date(group.latestCreated).toLocaleString('en-US', {
         year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
       });
-      card.innerHTML = `<h3>${escapeHTML(group.reason)}</h3><p class="order-time">Created: ${createdTime}</p>`;
-      card.addEventListener('click', () => openOrderModal(group));
+
+      const thumbTextRaw = String(preview.productName || group.reason || 'O').trim();
+      const thumbText = thumbTextRaw ? thumbTextRaw.slice(0, 2).toUpperCase() : 'O';
+
+      const card = document.createElement('div');
+      card.className = 'co-card';
+      card.tabIndex = 0;
+      card.setAttribute('role', 'button');
+      card.setAttribute('aria-label', `Open tracking for ${group.reason}`);
+      card.dataset.groupId = group.groupId;
+
+      card.innerHTML = `
+        <div class="co-row">
+          <div class="co-thumb">
+            ${
+              preview.productImage
+                ? `<img src="${escapeHTML(preview.productImage)}" alt=""/>`
+                : `<span class="co-thumb-text">${escapeHTML(thumbText)}</span>`
+            }
+          </div>
+
+          <div class="co-info">
+            <div class="co-title">${escapeHTML(group.reason)}</div>
+            <div class="co-meta">Created: ${createdTime} • ${itemsCount} item${itemsCount === 1 ? '' : 's'}</div>
+            <div class="co-product">
+              ${escapeHTML(preview.productName || '')}
+              ${itemsCount > 1 ? `<span class="co-more">+${itemsCount - 1} more</span>` : ''}
+            </div>
+          </div>
+
+          <div class="co-count">x${totalQty}</div>
+        </div>
+
+        <div class="co-sep"></div>
+
+        <div class="co-bottom">
+          <div class="co-total">
+            <div class="co-total-label">Estimate Total</div>
+            <div class="co-total-value">${formatMoney(estimateTotal)}</div>
+          </div>
+
+          <div class="co-status-btn ${allReceived ? 'is-done' : ''}">
+            ${escapeHTML(statusText)}
+          </div>
+        </div>
+      `;
+
+      card.addEventListener('click', () => openTrackingPage(group));
+      card.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          openTrackingPage(group);
+        }
+      });
+
       frag.appendChild(card);
     });
+
     ordersListDiv.appendChild(frag);
   }
 
@@ -207,11 +300,5 @@ item.innerHTML = `
   if (ordersListDiv) {
     fetchAndDisplayOrders();
     setupSearch();
-
-    if (orderModal && orderModalClose) {
-      orderModalClose.addEventListener('click', closeOrderModal);
-      orderModal.addEventListener('click', (e) => { if (e.target === orderModal) closeOrderModal(); });
-      document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeOrderModal(); });
-    }
   }
 });
