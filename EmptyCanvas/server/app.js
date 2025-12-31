@@ -1639,6 +1639,73 @@ app.get(
     const allComponents = [];
     let hasMore = true;
     let startCursor = undefined;
+
+    // ---- helpers: safely extract rollup/number/file url ----
+    // NOTE: "Unit price" in Notion is expected to be a Rollup property.
+    const normKeyLocal = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const getPropInsensitive = (props, name) => {
+      if (!props) return null;
+      if (props[name]) return props[name];
+      const want = normKeyLocal(name);
+      for (const k of Object.keys(props)) {
+        if (normKeyLocal(k) === want) return props[k];
+      }
+      return null;
+    };
+
+    const extractFirstFileUrl = (prop) => {
+      try {
+        if (!prop) return null;
+        // Notion files property
+        if (prop.type === 'files') {
+          const f = prop.files?.[0];
+          if (!f) return null;
+          if (f.type === 'file') return f.file?.url || null;
+          if (f.type === 'external') return f.external?.url || null;
+          return null;
+        }
+        // sometimes stored as url property
+        if (prop.type === 'url') return prop.url || null;
+        return null;
+      } catch {
+        return null;
+      }
+    };
+
+    const extractNumber = (prop) => {
+      try {
+        if (!prop) return null;
+        if (prop.type === 'number') return prop.number ?? null;
+        if (prop.type === 'formula') {
+          return prop.formula?.type === 'number' ? (prop.formula?.number ?? null) : null;
+        }
+        if (prop.type === 'rollup') {
+          const r = prop.rollup;
+          if (!r) return null;
+          if (r.type === 'number') return r.number ?? null;
+          if (r.type === 'array') {
+            // Some rollups return an array. Try:
+            // - sum numbers
+            // - first number
+            const arr = Array.isArray(r.array) ? r.array : [];
+            const nums = arr
+              .map((x) => {
+                if (!x) return null;
+                if (x.type === 'number') return x.number ?? null;
+                if (x.type === 'formula' && x.formula?.type === 'number') return x.formula?.number ?? null;
+                return null;
+              })
+              .filter((n) => typeof n === 'number' && Number.isFinite(n));
+            if (nums.length === 0) return null;
+            return nums.reduce((a, b) => a + b, 0);
+          }
+          return null;
+        }
+        return null;
+      } catch {
+        return null;
+      }
+    };
     try {
       while (hasMore) {
         const response = await notion.databases.query({
@@ -1650,11 +1717,24 @@ app.get(
           .map((page) => {
             const titleProperty = page.properties?.Name;
             const urlProperty = page.properties?.URL;
+            const unitPriceProp = getPropInsensitive(page.properties, 'Unit price');
+            const unitPrice = extractNumber(unitPriceProp);
+
+            // Optional image (if exists in DB). We support several common property names.
+            const imageProp =
+              getPropInsensitive(page.properties, 'Image') ||
+              getPropInsensitive(page.properties, 'Photo') ||
+              getPropInsensitive(page.properties, 'Picture') ||
+              getPropInsensitive(page.properties, 'Thumbnail') ||
+              getPropInsensitive(page.properties, 'Icon');
+            const imageUrl = extractFirstFileUrl(imageProp);
             if (titleProperty?.title?.length > 0) {
               return {
                 id: page.id,
                 name: titleProperty.title[0].plain_text,
                 url: urlProperty ? urlProperty.url : null,
+                unitPrice: typeof unitPrice === 'number' && Number.isFinite(unitPrice) ? unitPrice : null,
+                imageUrl: imageUrl || null,
               };
             }
             return null;
