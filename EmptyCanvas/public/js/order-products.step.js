@@ -230,9 +230,18 @@
         img.src = c.imageUrl;
         thumb.appendChild(img);
       } else {
-        // fallback: first letter
-        const letter = (String(name).trim()[0] || '•').toUpperCase();
-        thumb.textContent = letter;
+        // If Notion has an "ID" (unique_id) property, show it inside the icon.
+        const disp = String(c?.displayId || '').trim();
+        if (disp) {
+          thumb.textContent = disp;
+          thumb.classList.add('cart-thumb-has-id');
+          // A tiny dynamic size tweak so long IDs still fit inside the 58x58 box.
+          if (disp.length >= 8) thumb.classList.add('cart-thumb-id-small');
+        } else {
+          // fallback: first letter
+          const letter = (String(name).trim()[0] || '•').toUpperCase();
+          thumb.textContent = letter;
+        }
       }
 
       const meta = document.createElement('div');
