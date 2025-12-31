@@ -1637,8 +1637,10 @@ app.get(
     let hasMore = true;
     let startCursor = undefined;
 
-    // ---- helpers: safely extract rollup/number/file url ----
-    // NOTE: "Unit price" in Notion is expected to be a Rollup property.
+    // ---- helpers: safely extract number/file url/... ----
+    // NOTE:
+    // - Pricing in Products_Database is expected to be a Number property ("Unity Price").
+    // - Some workspaces may also have a legacy/alternate name like "Unit price".
     const normKeyLocal = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
     const getPropInsensitive = (props, name) => {
       if (!props) return null;
@@ -1758,6 +1760,68 @@ app.get(
         return null;
       }
     };
+
+    const extractUniqueIdText = (prop) => {
+      try {
+        if (!prop) return null;
+
+        // Notion "ID" property type
+        if (prop.type === 'unique_id') {
+          const u = prop.unique_id;
+          if (!u) return null;
+          const prefix = u.prefix ? String(u.prefix).trim() : '';
+          const num = typeof u.number === 'number' ? u.number : null;
+          if (num === null) return null;
+          return prefix ? `${prefix}-${num}` : String(num);
+        }
+
+        // If it's stored as something else, try best-effort fallbacks
+        if (prop.type === 'number' && typeof prop.number === 'number') {
+          return String(prop.number);
+        }
+        if (prop.type === 'formula') {
+          if (prop.formula?.type === 'string') return String(prop.formula.string || '').trim() || null;
+          if (prop.formula?.type === 'number' && typeof prop.formula.number === 'number') return String(prop.formula.number);
+        }
+        if (prop.type === 'rich_text') {
+          const t = (prop.rich_text || []).map((x) => x?.plain_text || '').join('').trim();
+          return t || null;
+        }
+        if (prop.type === 'title') {
+          const t = (prop.title || []).map((x) => x?.plain_text || '').join('').trim();
+          return t || null;
+        }
+        if (prop.type === 'rollup') {
+          const r = prop.rollup;
+          if (!r) return null;
+          if (r.type === 'number' && typeof r.number === 'number') return String(r.number);
+          if (r.type === 'array') {
+            const arr = Array.isArray(r.array) ? r.array : [];
+            // return first non-empty text-like value
+            for (const v of arr) {
+              if (!v) continue;
+              if (v.type === 'unique_id') {
+                const x = extractUniqueIdText(v);
+                if (x) return x;
+              }
+              if (v.type === 'rich_text') {
+                const t = (v.rich_text || []).map((x) => x?.plain_text || '').join('').trim();
+                if (t) return t;
+              }
+              if (v.type === 'title') {
+                const t = (v.title || []).map((x) => x?.plain_text || '').join('').trim();
+                if (t) return t;
+              }
+              if (v.type === 'number' && typeof v.number === 'number') return String(v.number);
+            }
+          }
+        }
+
+        return null;
+      } catch {
+        return null;
+      }
+    };
     try {
       while (hasMore) {
         const response = await notion.databases.query({
@@ -1769,8 +1833,15 @@ app.get(
           .map((page) => {
             const titleProperty = page.properties?.Name;
             const urlProperty = page.properties?.URL;
-            const unitPriceProp = getPropInsensitive(page.properties, 'Unit price');
+            // Price: "Unity Price" (Number) in Products_Database
+            const unitPriceProp =
+              getPropInsensitive(page.properties, 'Unity Price') ||
+              getPropInsensitive(page.properties, 'Unit price');
             const unitPrice = extractNumber(unitPriceProp);
+
+            // Display ID inside the product icon (Notion property type: ID / unique_id)
+            const displayIdProp = getPropInsensitive(page.properties, 'ID');
+            const displayId = extractUniqueIdText(displayIdProp);
 
             // Optional image (if exists in DB). We support several common property names.
             const imageProp =
@@ -1786,6 +1857,7 @@ app.get(
                 name: titleProperty.title[0].plain_text,
                 url: urlProperty ? urlProperty.url : null,
                 unitPrice: typeof unitPrice === 'number' && Number.isFinite(unitPrice) ? unitPrice : null,
+                displayId: displayId || null,
                 imageUrl: imageUrl || null,
               };
             }
