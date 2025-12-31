@@ -11,13 +11,11 @@
   const updateCartBtn = document.getElementById('updateCartBtn');
   const checkoutBtn = document.getElementById('checkoutBtn');
 
-  const voucherInput = document.getElementById('voucherInput');
-  const applyVoucherBtn = document.getElementById('applyVoucherBtn');
+  // NOTE: requested change: "Discount voucher" is now used as a password field
+  // and it must be filled before Checkout.
+  const passwordInput = document.getElementById('voucherInput');
   const summarySubTotalEl = document.getElementById('summarySubTotal');
-  const summaryDiscountEl = document.getElementById('summaryDiscount');
-  const summaryDeliveryEl = document.getElementById('summaryDelivery');
   const summaryTotalEl = document.getElementById('summaryTotal');
-  const summaryDiscountLabelEl = document.getElementById('summaryDiscountLabel');
 
   const modalEl = document.getElementById('updateCartModal');
   const modalCloseBtn = document.getElementById('updateCartClose');
@@ -79,8 +77,7 @@
   let byId = new Map();
   let cart = []; // draft products
 
-  let discountPercent = 0; // 0 or 0.10
-  const deliveryFee = 0; // keep 0 by default (design-only line)
+  // Discounts / delivery fees removed per request
 
   let choicesInst = null;
   let saveTimer = null;
@@ -182,20 +179,10 @@
 
   function updateSummary() {
     const subtotal = cart.reduce((sum, p) => sum + itemTotal(p), 0);
-    const discount = subtotal * (discountPercent || 0);
-    const total = subtotal - discount + deliveryFee;
+    const total = subtotal;
 
     if (summarySubTotalEl) summarySubTotalEl.textContent = formatMoney(subtotal);
-    if (summaryDeliveryEl) summaryDeliveryEl.textContent = formatMoney(deliveryFee);
     if (summaryTotalEl) summaryTotalEl.textContent = formatMoney(total);
-
-    if (summaryDiscountLabelEl) {
-      summaryDiscountLabelEl.textContent = discountPercent > 0 ? `Discount (${Math.round(discountPercent * 100)}%)` : 'Discount';
-    }
-    if (summaryDiscountEl) {
-      // show negative value when discount is applied
-      summaryDiscountEl.textContent = discount > 0 ? '-' + formatMoney(discount) : formatMoney(0);
-    }
   }
 
   function renderEmptyState() {
@@ -491,26 +478,22 @@
     }
   }
 
-  // ---------------------------- Voucher (design-only) ----------------------------
-  function applyVoucher() {
-    const code = String(voucherInput?.value || '').trim();
-    if (!code) {
-      discountPercent = 0;
-      updateSummary();
-      toast('info', 'Voucher', 'Voucher cleared.');
-      return;
-    }
-
-    // Simple behavior: any non-empty code enables 10% discount
-    discountPercent = 0.1;
-    updateSummary();
-    toast('success', 'Voucher applied', 'Discount applied to your cart.');
+  function getPasswordValue() {
+    return String(passwordInput?.value || '').trim();
   }
 
   // ---------------------------- Checkout ----------------------------
   async function checkout() {
     if (!Array.isArray(cart) || cart.length === 0) {
       toast('error', 'Empty cart', 'Please add at least one component.');
+      return;
+    }
+
+    // Password is required before checkout (requested)
+    const password = getPasswordValue();
+    if (!password) {
+      toast('error', 'Password required', 'Please enter your password before checkout.');
+      try { passwordInput?.focus?.(); } catch {}
       return;
     }
 
@@ -538,11 +521,27 @@
       const res = await fetch('/api/submit-order', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ products: cart }),
+        body: JSON.stringify({ products: cart, password }),
       });
 
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.success) {
+        // Make password failures explicit for the user
+        if (res.status === 401) {
+          toast('error', 'Wrong password', data?.message || 'Invalid password.');
+          try {
+            passwordInput?.focus?.();
+            passwordInput?.select?.();
+          } catch {}
+          return;
+        }
+        if (res.status === 400 && String(data?.message || '').toLowerCase().includes('password')) {
+          toast('error', 'Password required', data?.message || 'Password is required.');
+          try {
+            passwordInput?.focus?.();
+          } catch {}
+          return;
+        }
         throw new Error(data?.message || 'Failed to submit order.');
       }
 
@@ -550,8 +549,7 @@
 
       // Clear UI immediately
       cart = [];
-      discountPercent = 0;
-      if (voucherInput) voucherInput.value = '';
+      if (passwordInput) passwordInput.value = '';
       renderCart();
 
       // Go back to orders list
@@ -609,8 +607,15 @@
       if (!saved) toast('error', 'Error', 'Failed to save cart.');
     });
 
-    applyVoucherBtn?.addEventListener('click', applyVoucher);
     checkoutBtn?.addEventListener('click', checkout);
+
+    // UX: pressing Enter in password field triggers checkout
+    passwordInput?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        checkout();
+      }
+    });
   }
 
   // ---------------------------- Init ----------------------------
