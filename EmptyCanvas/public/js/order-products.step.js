@@ -522,12 +522,52 @@
       return;
     }
 
-    showSaving('Saving cart...');
-    const ok = await persistDraft({ silent: false });
-    hideSaving();
-    if (!ok) return;
+    // Prevent double submit
+    if (checkoutBtn && checkoutBtn.disabled) return;
+    if (checkoutBtn) {
+      checkoutBtn.disabled = true;
+      checkoutBtn.setAttribute('aria-busy', 'true');
+    }
 
-    window.location.href = '/orders/new/review';
+    showSaving('Submitting order...');
+
+    try {
+      // Persist draft (optional) so the server session stays in sync
+      await persistDraft({ silent: true });
+
+      const res = await fetch('/api/submit-order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ products: cart }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        throw new Error(data?.message || 'Failed to submit order.');
+      }
+
+      toast('success', 'Order Submitted!', 'Your order has been created successfully.');
+
+      // Clear UI immediately
+      cart = [];
+      discountPercent = 0;
+      if (voucherInput) voucherInput.value = '';
+      renderCart();
+
+      // Go back to orders list
+      setTimeout(() => {
+        window.location.href = '/orders';
+      }, 900);
+    } catch (err) {
+      console.error('checkout submit error:', err);
+      toast('error', 'Submission Failed', err?.message || 'Something went wrong. Please try again.');
+    } finally {
+      hideSaving();
+      if (checkoutBtn) {
+        checkoutBtn.disabled = false;
+        checkoutBtn.removeAttribute('aria-busy');
+      }
+    }
   }
 
   // ---------------------------- Bindings ----------------------------
