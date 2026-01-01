@@ -134,8 +134,11 @@ document.addEventListener('DOMContentLoaded', function () {
             <div class="co-total-value">${formatMoney(estimateTotal)}</div>
           </div>
 
-          <div class="co-status-btn ${allReceived ? 'is-done' : ''}">
-            ${escapeHTML(statusText)}
+          <div class="co-actions">
+            <div class="co-status-btn ${allReceived ? 'is-done' : ''}">
+              ${escapeHTML(statusText)}
+            </div>
+            <div class="co-icon-btn" aria-hidden="true">%</div>
           </div>
         </div>
       `;
