@@ -286,7 +286,6 @@ if (document.querySelector('.sidebar')) {
   const PAGE_SELECTORS = {
     // ===== Orders =====
     'current orders': 'a[href="/orders"]',
-    'your orders': 'a[href="/orders/your"]',
     'create new order': 'a[href="/orders/new"]',
     'stocktaking': 'a[href="/stocktaking"]',
 
@@ -385,7 +384,7 @@ if (document.querySelector('.sidebar')) {
   };
 
   // ★ Inject links once so they exist for show/hide (لو مش موجودين في الـ HTML)
-  function ensureLink({ href: '/orders/your', label: 'Your Orders', icon: 'shopping-bag' }); {
+  function ensureLink({ href, label, icon }) {
     const nav = document.querySelector('.sidebar .nav-list, .sidebar nav ul, .sidebar ul');
     if (!nav) return;
     if (nav.querySelector(`a[href="${href}"]`)) return;
