@@ -488,6 +488,171 @@ body.sidebar-collapsed .sidebar-toggle svg{ transform:rotate(180deg); }
 .loading-cell{ display:flex; justify-content:center; align-items:center; gap:8px; color:var(--text-secondary); padding:1rem; }
 .loading-icon{ display:inline-block; animation:spin 1.5s linear infinite; vertical-align:middle; }
 
+/* =================================
+   Current Orders — Card UI (matches the provided mock)
+   ================================= */
+.co-cards{
+  display: grid;
+  gap: 14px;
+}
+
+.co-card{
+  background: #fff;
+  border: 1px solid #E5E7EB;
+  border-radius: 26px;
+  padding: 18px 18px;
+  box-shadow: 0 16px 36px rgba(0,0,0,.08);
+  cursor: pointer;
+  user-select: none;
+}
+
+.co-card:hover{
+  box-shadow: 0 22px 44px rgba(0,0,0,.10);
+}
+
+.co-card:focus-visible{
+  outline: 3px solid rgba(234,88,12,.35);
+  outline-offset: 3px;
+}
+
+.co-top{
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.co-thumb{
+  width: 82px;
+  height: 82px;
+  border-radius: 22px;
+  background: #F3F4F6;
+  overflow: hidden;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.co-thumb img{
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.co-thumb__ph{
+  font-weight: 900;
+  color: #374151;
+}
+
+.co-main{ flex: 1; min-width: 0; }
+
+.co-title{
+  font-size: 22px;
+  font-weight: 900;
+  color: #111827;
+  line-height: 1.2;
+  margin-top: 2px;
+}
+
+.co-sub{
+  font-size: 14px;
+  color: #9CA3AF;
+  margin-top: 6px;
+}
+
+.co-price{
+  font-size: 40px;
+  font-weight: 900;
+  color: #111827;
+  line-height: 1;
+  margin-top: 10px;
+}
+
+.co-qty{
+  font-size: 18px;
+  font-weight: 800;
+  color: #9CA3AF;
+  align-self: flex-start;
+  margin-left: 8px;
+  white-space: nowrap;
+}
+
+.co-divider{
+  height: 1px;
+  background: #E5E7EB;
+  margin: 18px 0;
+}
+
+.co-bottom{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.co-est-label{
+  font-size: 16px;
+  color: #9CA3AF;
+}
+
+.co-est-value{
+  font-size: 30px;
+  font-weight: 900;
+  color: #111827;
+  line-height: 1.1;
+  margin-top: 6px;
+}
+
+.co-actions{
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+}
+
+/* Looks like the black status button in the mock */
+.co-status-btn{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 14px 22px;
+  border-radius: 999px;
+  background: #111827;
+  color: #fff;
+  font-weight: 900;
+  font-size: 14px;
+  letter-spacing: .2px;
+  white-space: nowrap;
+}
+
+.co-right-ico{
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: #111827;
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.co-right-ico svg{
+  width: 20px;
+  height: 20px;
+}
+
+@media (max-width: 520px){
+  .co-card{ padding: 14px 14px; border-radius: 22px; }
+  .co-thumb{ width: 72px; height: 72px; border-radius: 18px; }
+  .co-title{ font-size: 18px; }
+  .co-price{ font-size: 32px; }
+  .co-est-value{ font-size: 24px; }
+  .co-right-ico{ width: 46px; height: 46px; }
+  .co-status-btn{ padding: 12px 18px; }
+}
+
 .sidebar-footer .nav-link{ width:100%; margin-bottom:0; }
 
 .create-order-layout{ grid-template-columns:2fr 1fr; gap:2rem; align-items:start; }
