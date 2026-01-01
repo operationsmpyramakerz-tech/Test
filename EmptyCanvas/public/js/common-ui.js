@@ -286,6 +286,7 @@ if (document.querySelector('.sidebar')) {
   const PAGE_SELECTORS = {
     // ===== Orders =====
     'current orders': 'a[href="/orders"]',
+    'your orders': 'a[href="/orders/your"]',
     'create new order': 'a[href="/orders/new"]',
     'stocktaking': 'a[href="/stocktaking"]',
 
