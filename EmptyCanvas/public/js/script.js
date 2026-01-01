@@ -53,6 +53,17 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  // Date-only (to show under the Reason on the card)
+  function fmtDateOnly(createdTime) {
+    const d = toDate(createdTime);
+    if (Number.isNaN(d.getTime())) return '';
+    return d.toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    });
+  }
+
   function sortByNewest(list) {
     return (list || []).slice().sort((a, b) => toDate(b.createdTime) - toDate(a.createdTime));
   }
@@ -110,18 +121,25 @@ document.addEventListener('DOMContentLoaded', () => {
     const first = items[0] || {};
 
     const itemsCount = items.length;
-    const totalQty = items.reduce((sum, x) => sum + (Number(x.quantity) || 0), 0);
-    const estimateTotal = items.reduce((sum, x) => sum + (Number(x.quantity) || 0) * (Number(x.unitPrice) || 0), 0);
+    // "Components price" = total cost of all items (qty * unitPrice)
+    const estimateTotal = items.reduce(
+      (sum, x) => sum + (Number(x.quantity) || 0) * (Number(x.unitPrice) || 0),
+      0,
+    );
 
-    const created = fmtCreated(group.latestCreated);
+    // "NUMBERX" on the card should represent the number of components/items, not total quantity
+    const componentsCount = itemsCount;
+
+    const created = fmtDateOnly(group.latestCreated);
     const stage = computeStage(items);
 
     const title = escapeHTML(group.reason);
 
-    let sub = first.productName ? escapeHTML(first.productName) : '—';
-    if (itemsCount > 1) sub += ` <span class="co-more">+${itemsCount - 1} more</span>`;
+    // Under the title we show the date (per requested mapping)
+    const sub = created ? escapeHTML(created) : '—';
 
-    const unitPrice = fmtMoney(first.unitPrice);
+    // Card price shows components total price (per requested mapping)
+    const componentsPrice = fmtMoney(estimateTotal);
 
     const thumbHTML = first.productImage
       ? `<img src="${escapeHTML(first.productImage)}" alt="${escapeHTML(first.productName || group.reason)}" loading="lazy" />`
@@ -140,10 +158,10 @@ document.addEventListener('DOMContentLoaded', () => {
         <div class="co-main">
           <div class="co-title">${title}</div>
           <div class="co-sub">${sub}</div>
-          <div class="co-price">${unitPrice}</div>
+          <div class="co-price">${componentsPrice}</div>
         </div>
 
-        <div class="co-qty">x${Number.isFinite(totalQty) ? totalQty : 0}</div>
+        <div class="co-qty">x${Number.isFinite(componentsCount) ? componentsCount : 0}</div>
       </div>
 
       <div class="co-divider"></div>
@@ -151,12 +169,11 @@ document.addEventListener('DOMContentLoaded', () => {
       <div class="co-bottom">
         <div class="co-est">
           <div class="co-est-label">Estimate Total</div>
-          <div class="co-est-value">${fmtMoney(estimateTotal)}</div>
-          <div class="co-meta">Created: ${escapeHTML(created)} • ${itemsCount} item${itemsCount === 1 ? '' : 's'}</div>
+          <div class="co-est-value">${componentsPrice}</div>
         </div>
 
         <div class="co-actions">
-          <span class="${stage.pill}">${escapeHTML(stage.label)}</span>
+          <span class="co-status-btn">${escapeHTML(stage.label)}</span>
           <span class="co-right-ico" aria-hidden="true"><i data-feather="percent"></i></span>
         </div>
       </div>
