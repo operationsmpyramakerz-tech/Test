@@ -385,7 +385,7 @@ if (document.querySelector('.sidebar')) {
   };
 
   // ★ Inject links once so they exist for show/hide (لو مش موجودين في الـ HTML)
-  function ensureLink({ href, label, icon }) {
+  function ensureLink({ href: '/orders/your', label: 'Your Orders', icon: 'shopping-bag' }); {
     const nav = document.querySelector('.sidebar .nav-list, .sidebar nav ul, .sidebar ul');
     if (!nav) return;
     if (nav.querySelector(`a[href="${href}"]`)) return;
