@@ -400,6 +400,13 @@ function requireAuth(req, res, next) {
 function requirePage(pageName) {
   return (req, res, next) => {
     const allowed = req.session?.allowedPages || ALL_PAGES;
+  // Back-compat / aliasing: "Your Orders" is an additional UI for the same
+    // underlying user orders. Users who already have "Current Orders" should
+    // be allowed to open "Your Orders" even if their session was created
+    // before this page existed.
+    if (pageName === "Your Orders" && allowed.includes("Current Orders")) {
+      return next();
+    }
     if (allowed.includes(pageName)) return next();
     return res.redirect(firstAllowedPath(allowed));
   };
@@ -426,6 +433,15 @@ app.get("/dashboard", requireAuth, (req, res) => {
 app.get("/orders", requireAuth, requirePage("Current Orders"), (req, res) => {
   res.sendFile(path.join(__dirname, "..", "public", "current-orders.html"));
 });
+// User-friendly list view of the current user's orders (cards like the reference screenshot)
+app.get(
+  "/orders/your",
+  requireAuth,
+  requirePage("Your Orders"),
+  (req, res) => {
+    res.sendFile(path.join(__dirname, "..", "public", "your-orders.html"));
+  },
+);
 
 app.get("/orders/tracking", requireAuth, requirePage("Current Orders"), (req, res) => {
   res.sendFile(path.join(__dirname, "..", "public", "order-tracking.html"));
@@ -874,6 +890,176 @@ allOrders.push({
       const merged = allOrders
         .concat(extras)
         .sort((a, b) => new Date(b.createdTime) - new Date(a.createdTime));
+
+      req.session.recentOrders = recent;
+
+      res.json(merged);
+    } catch (error) {
+      console.error("Error fetching orders from Notion:", error.body || error);
+      res.status(500).json({ error: "Failed to fetch orders from Notion." });
+    }
+  },
+);
+
+// Orders listing (Your Orders) — same data as /api/orders but guarded by "Your Orders" permission
+app.get(
+  "/api/orders/your",
+  requireAuth,
+  requirePage("Your Orders"),
+  async (req, res) => {
+    if (!ordersDatabaseId || !teamMembersDatabaseId) {
+      return res.status(500).json({ error: "Database IDs are not configured." });
+    }
+
+    res.set("Cache-Control", "no-store");
+
+    try {
+      const userQuery = await notion.databases.query({
+        database_id: teamMembersDatabaseId,
+        filter: { property: "Name", title: { equals: req.session.username } },
+      });
+      if (userQuery.results.length === 0) {
+        return res.status(404).json({ error: "User not found." });
+      }
+      const userId = userQuery.results[0].id;
+
+      const allOrders = [];
+      let hasMore = true;
+      let startCursor = undefined;
+
+      const parseNumberProp = (prop) => {
+        if (!prop) return null;
+        try {
+          if (prop.type === "number") return prop.number ?? null;
+
+          if (prop.type === "formula") {
+            if (prop.formula?.type === "number") return prop.formula.number ?? null;
+            if (prop.formula?.type === "string") {
+              const n = parseFloat(String(prop.formula.string || "").replace(/[^0-9.]/g, ""));
+              return Number.isFinite(n) ? n : null;
+            }
+          }
+
+          if (prop.type === "rollup") {
+            if (prop.rollup?.type === "number") return prop.rollup.number ?? null;
+
+            if (prop.rollup?.type === "array") {
+              const arr = prop.rollup.array || [];
+              for (const x of arr) {
+                if (x.type === "number" && typeof x.number === "number") return x.number;
+                if (x.type === "formula" && x.formula?.type === "number") return x.formula.number;
+                if (x.type === "formula" && x.formula?.type === "string") {
+                  const n = parseFloat(String(x.formula.string || "").replace(/[^0-9.]/g, ""));
+                  if (Number.isFinite(n)) return n;
+                }
+                if (x.type === "rich_text") {
+                  const t = (x.rich_text || []).map((r) => r.plain_text).join("").trim();
+                  const n = parseFloat(t.replace(/[^0-9.]/g, ""));
+                  if (Number.isFinite(n)) return n;
+                }
+              }
+            }
+          }
+
+          if (prop.type === "rich_text") {
+            const t = (prop.rich_text || []).map((r) => r.plain_text).join("").trim();
+            const n = parseFloat(t.replace(/[^0-9.]/g, ""));
+            return Number.isFinite(n) ? n : null;
+          }
+        } catch {}
+        return null;
+      };
+
+      const tryExtractSize = (props = {}) => {
+        try {
+          for (const [key, prop] of Object.entries(props || {})) {
+            if (!/\bsize\b/i.test(String(key))) continue;
+            if (!prop || !prop.type) continue;
+            if (prop.type === "select") return prop.select?.name || null;
+            if (prop.type === "multi_select") {
+              const names = (prop.multi_select || []).map((x) => x?.name).filter(Boolean);
+              return names.length ? names.join(", ") : null;
+            }
+            if (prop.type === "rich_text") {
+              const t = (prop.rich_text || []).map((r) => r.plain_text).join("").trim();
+              return t || null;
+            }
+            if (prop.type === "title") {
+              const t = (prop.title || []).map((r) => r.plain_text).join("").trim();
+              return t || null;
+            }
+            if (prop.type === "number" && typeof prop.number === "number") return String(prop.number);
+          }
+        } catch {}
+        return null;
+      };
+
+      while (hasMore) {
+        const response = await notion.databases.query({
+          database_id: ordersDatabaseId,
+          start_cursor: startCursor,
+          filter: { property: "Teams Members", relation: { contains: userId } },
+          sorts: [{ timestamp: "created_time", direction: "descending" }],
+        });
+
+        for (const page of response.results) {
+          const productRelation = page.properties.Product?.relation;
+          let productName = "Unknown Product";
+          let unitPrice = null;
+          let productImage = null;
+
+          const size = tryExtractSize(page.properties || {});
+
+          if (productRelation && productRelation.length > 0) {
+            try {
+              const productPage = await notion.pages.retrieve({
+                page_id: productRelation[0].id,
+              });
+
+              productName =
+                productPage.properties?.Name?.title?.[0]?.plain_text ||
+                "Unknown Product";
+
+              unitPrice =
+                parseNumberProp(productPage.properties?.["Unity Price"]) ??
+                parseNumberProp(productPage.properties?.["Unit price"]) ??
+                parseNumberProp(productPage.properties?.["Unit Price"]) ??
+                parseNumberProp(productPage.properties?.["Price"]) ??
+                null;
+
+              if (productPage.cover?.type === "external") productImage = productPage.cover.external.url;
+              if (productPage.cover?.type === "file") productImage = productPage.cover.file.url;
+              if (!productImage && productPage.icon?.type === "external") productImage = productPage.icon.external.url;
+              if (!productImage && productPage.icon?.type === "file") productImage = productPage.icon.file.url;
+            } catch (e) {
+              console.error("Could not retrieve related product page:", e.body || e.message);
+            }
+          }
+
+          allOrders.push({
+            id: page.id,
+            reason: page.properties?.Reason?.title?.[0]?.plain_text || "No Reason",
+            size,
+            productName,
+            productImage,
+            unitPrice,
+            quantity: page.properties?.["Quantity Requested"]?.number || 0,
+            status: page.properties?.["Status"]?.select?.name || "Pending",
+            createdTime: page.created_time,
+          });
+        }
+
+        hasMore = response.has_more;
+        startCursor = response.next_cursor;
+      }
+
+      const TTL_MS = 10 * 60 * 1000;
+      let recent = Array.isArray(req.session.recentOrders) ? req.session.recentOrders : [];
+      recent = recent.filter((r) => Date.now() - new Date(r.createdTime).getTime() < TTL_MS);
+
+      const ids = new Set(allOrders.map((o) => o.id));
+      const extras = recent.filter((r) => !ids.has(r.id));
+      const merged = allOrders.concat(extras).sort((a, b) => new Date(b.createdTime) - new Date(a.createdTime));
 
       req.session.recentOrders = recent;
 
