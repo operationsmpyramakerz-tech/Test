@@ -3597,23 +3597,31 @@ body.sidebar-mini .sidebar-footer .account-mini .label{
    Current Orders — card layout (requested to match ref image #1)
    Scoped to #current-orders only.
    ========================================================= */
+/* Remove the outer "section.card" chrome so the order cards feel like
+   the reference mobile UI (cards directly on the page background). */
+#current-orders.card{
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+  border: 0;
+}
+
 #current-orders .co-grid{
   display: grid;
   grid-template-columns: 1fr;
-  gap: 14px;
+  gap: 16px;
+  max-width: 720px;
+  margin: 0 auto;
 }
-@media (min-width: 720px){
-  #current-orders .co-grid{
-    grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
-  }
-}
+
+/* Keep 1-column like the reference; wide screens still look clean. */
 
 #current-orders .co-card{
   background: #ffffff;
-  border: 1px solid #E5E7EB;
-  border-radius: 18px;
-  padding: 14px;
-  box-shadow: 0 10px 24px rgba(0,0,0,.06);
+  border: 1px solid #F3F4F6;
+  border-radius: 22px;
+  padding: 18px 18px 16px;
+  box-shadow: 0 14px 30px rgba(0,0,0,.08);
   cursor: pointer;
   transition: transform .12s ease, box-shadow .12s ease;
 }
@@ -3633,12 +3641,12 @@ body.sidebar-mini .sidebar-footer .account-mini .label{
 }
 
 #current-orders .co-thumb{
-  width: 76px;
-  height: 76px;
-  border-radius: 16px;
+  width: 74px;
+  height: 74px;
+  border-radius: 18px;
   overflow: hidden;
   background: #F3F4F6;
-  border: 1px solid #E5E7EB;
+  border: 1px solid #F3F4F6;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3660,7 +3668,7 @@ body.sidebar-mini .sidebar-footer .account-mini .label{
 }
 #current-orders .co-title{
   font-weight: 900;
-  font-size: 1rem;
+  font-size: 1.05rem;
   color: #111827;
   white-space: nowrap;
   overflow: hidden;
@@ -3699,7 +3707,7 @@ body.sidebar-mini .sidebar-footer .account-mini .label{
 #current-orders .co-sep{
   height: 1px;
   background: #F3F4F6;
-  margin: 12px 0;
+  margin: 14px 0 12px;
 }
 
 #current-orders .co-bottom{
@@ -3719,17 +3727,39 @@ body.sidebar-mini .sidebar-footer .account-mini .label{
   color: #111827;
 }
 
+#current-orders .co-actions{
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
 #current-orders .co-status-btn{
-  padding: 10px 14px;
+  padding: 12px 18px;
   border-radius: 999px;
   background: #111827;
   color: #ffffff;
   font-weight: 900;
-  font-size: .9rem;
+  font-size: .92rem;
   white-space: nowrap;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
-#current-orders .co-status-btn.is-done{
-  background: #16A34A;
+#current-orders .co-status-btn.is-done{ background: #16A34A; }
+
+/* Small circular icon button like the reference (%). */
+#current-orders .co-icon-btn{
+  width: 44px;
+  height: 44px;
+  border-radius: 999px;
+  background: #111827;
+  color: #ffffff;
+  font-weight: 950;
+  font-size: 18px;
+  display: grid;
+  place-items: center;
+  user-select: none;
 }
 
 /* =========================================================
@@ -3783,7 +3813,7 @@ body.sidebar-mini .sidebar-footer .account-mini .label{
 /* Progress pill */
 .tracking-page .trk-pill{
   margin: 26px 0 22px;
-  background: #111827;
+  background: #2C2F36;
   border-radius: 999px;
   padding: 16px;
   display: flex;
@@ -3796,6 +3826,7 @@ body.sidebar-mini .sidebar-footer .account-mini .label{
   height: 64px;
   border-radius: 999px;
   background: rgba(255,255,255,.18);
+  color: #9CA3AF; /* inactive icon color */
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3808,9 +3839,7 @@ body.sidebar-mini .sidebar-footer .account-mini .label{
 .tracking-page .trk-step.active{
   background: #D6F25E; /* close to reference green */
 }
-.tracking-page .trk-step.active svg{
-  stroke: #111827;
-}
+.tracking-page .trk-step.active{ color: #111827; }
 
 .tracking-page .trk-connector{
   flex: 1;
