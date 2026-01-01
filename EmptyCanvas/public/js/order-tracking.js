@@ -43,6 +43,13 @@ document.addEventListener('DOMContentLoaded', () => {
     return d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
   }
 
+  function formatTimeForUI(v) {
+    const t = formatTimeMaybe(v);
+    if (t === '--:--') return t;
+    // Match the reference typography: add spaces around the colon (09 : 20)
+    return t.replace(':', ' : ');
+  }
+
   function setStage(stage) {
     // stage: 1 = placed, 2 = on the way, 3 = delivered
     step1?.classList.add('active');
@@ -102,7 +109,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       // ETA: prefer explicit ETA prop; fallback to created time (time only)
       const etaValue = data.eta || data.createdTime;
-      etaEl.textContent = formatTimeMaybe(etaValue);
+      etaEl.textContent = formatTimeForUI(etaValue);
 
       // Render items list (optional)
       const items = Array.isArray(data.items) ? data.items : [];
