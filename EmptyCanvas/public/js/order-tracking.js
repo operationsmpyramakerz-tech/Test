@@ -1,83 +1,107 @@
 // public/js/order-tracking.js
+
 document.addEventListener('DOMContentLoaded', () => {
-  const $ = (id) => document.getElementById(id);
+  const titleEl = document.getElementById('trackingTitle');
+  const subEl = document.getElementById('trackingSubtitle');
+  const etaEl = document.getElementById('trackingEta');
+  const metaEl = document.getElementById('trackingMeta');
+  const fillEl = document.getElementById('trackFill');
+  const pillEl = document.getElementById('trackPill');
+  const itemsListEl = document.getElementById('trackingItemsList');
 
-  const titleEl = $('trkTitle');
-  const subEl = $('trkSubtitle');
-  const etaEl = $('trkEta');
+  const url = new URL(window.location.href);
+  const groupId = url.searchParams.get('groupId');
 
-  const reasonEl = $('trkReason');
-  const itemsCountEl = $('trkItemsCount');
-  const totalQtyEl = $('trkTotalQty');
-  const estimateTotalEl = $('trkEstimateTotal');
-  const itemsEl = $('trkItems');
-
-  const step1 = $('trkStep1');
-  const step2 = $('trkStep2');
-  const step3 = $('trkStep3');
-  const conn1 = $('trkConn1');
-  const conn2 = $('trkConn2');
-
-  const escapeHTML = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-  }[c]));
-
-  const formatMoney = (value) => {
-    const n = Number(value);
-    if (!Number.isFinite(n)) return '£0.00';
+  const moneyFmt = (() => {
     try {
-      return new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP' }).format(n);
+      return new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP' });
     } catch {
-      return `£${n.toFixed(2)}`;
+      return null;
     }
-  };
+  })();
 
-  function formatTimeMaybe(v) {
-    // If v is an ISO date string, show HH:MM.
-    // If v is already like '09:20', keep it.
-    if (!v) return '--:--';
-    const s = String(v).trim();
-    if (/^\d{1,2}:\d{2}$/.test(s)) return s;
-    const d = new Date(s);
-    if (isNaN(d.getTime())) return '--:--';
-    return d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  function fmtMoney(v) {
+    const n = Number(v);
+    const safe = Number.isFinite(n) ? n : 0;
+    return moneyFmt ? moneyFmt.format(safe) : `£${safe.toFixed(2)}`;
   }
 
-  function formatTimeForUI(v) {
-    const t = formatTimeMaybe(v);
-    if (t === '--:--') return t;
-    // Match the reference typography: add spaces around the colon (09 : 20)
-    return t.replace(':', ' : ');
+  function pad2(n) {
+    const x = Number(n) || 0;
+    return String(x).padStart(2, '0');
   }
 
-  function setStage(stage) {
-    // stage: 1 = placed, 2 = on the way, 3 = delivered
-    step1?.classList.add('active');
+  function fmtHHMM(iso) {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '-- : --';
+    return `${pad2(d.getHours())} : ${pad2(d.getMinutes())}`;
+  }
 
-    if (stage >= 2) {
-      conn1?.classList.add('active');
-      step2?.classList.add('active');
-    } else {
-      conn1?.classList.remove('active');
-      step2?.classList.remove('active');
-    }
+  function setProgress(step) {
+    const s = Number(step) || 1;
+    const nodes = pillEl ? Array.from(pillEl.querySelectorAll('.track-node')) : [];
+    nodes.forEach((node) => {
+      const n = Number(node.dataset.step);
+      node.classList.remove('is-active', 'is-done');
+      if (n < s) node.classList.add('is-done');
+      else if (n === s) node.classList.add('is-active');
+    });
 
-    if (stage >= 3) {
-      conn2?.classList.add('active');
-      step3?.classList.add('active');
-    } else {
-      conn2?.classList.remove('active');
-      step3?.classList.remove('active');
+    // Fill width: 1 => ~33%, 2 => ~66%, 3 => 100%
+    if (fillEl) {
+      const pct = s <= 1 ? 34 : s === 2 ? 67 : 100;
+      fillEl.style.width = `${pct}%`;
     }
   }
 
-  async function load() {
-    const params = new URLSearchParams(window.location.search);
-    const groupId = params.get('groupId');
+  function esc(s) {
+    return String(s ?? '').replace(/[&<>"]/g, (c) => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+    }[c]));
+  }
 
+  function renderItems(items) {
+    if (!itemsListEl) return;
+    itemsListEl.innerHTML = '';
+
+    if (!Array.isArray(items) || items.length === 0) {
+      itemsListEl.innerHTML = '<p class="muted">No items found.</p>';
+      return;
+    }
+
+    const frag = document.createDocumentFragment();
+    for (const it of items) {
+      const row = document.createElement('div');
+      row.className = 'tracking-item';
+
+      const thumb = it.productImage
+        ? `<img src="${esc(it.productImage)}" alt="${esc(it.productName || '')}" loading="lazy" />`
+        : `<div class="tracking-item__ph">${esc(String(it.productName || '?').trim().slice(0, 2).toUpperCase())}</div>`;
+
+      row.innerHTML = `
+        <div class="tracking-item__thumb">${thumb}</div>
+        <div class="tracking-item__main">
+          <div class="tracking-item__name">${esc(it.productName || 'Unknown Product')}</div>
+          <div class="tracking-item__sub">Qty: <strong>${Number(it.quantity) || 0}</strong> • Unit: ${fmtMoney(it.unitPrice)}</div>
+        </div>
+        <div class="tracking-item__status">
+          <span class="pill ${String(it.status || '').toLowerCase() === 'received' ? 'pill--success' : 'pill--danger'}">${esc(it.status || 'Pending')}</span>
+        </div>
+      `;
+
+      frag.appendChild(row);
+    }
+    itemsListEl.appendChild(frag);
+  }
+
+  async function loadTracking() {
     if (!groupId) {
       titleEl.textContent = 'Missing order';
-      subEl.textContent = 'No tracking info: groupId is missing.';
+      subEl.textContent = 'No groupId was provided.';
+      setProgress(1);
       return;
     }
 
@@ -92,58 +116,37 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       }
 
-      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new Error(data.error || 'Failed to load tracking info');
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Failed to load tracking');
       }
 
-      titleEl.textContent = data.headerTitle || 'On the way';
-      subEl.textContent = data.headerSubtitle || '';
+      const data = await res.json();
+      const stage = data.stage || {};
 
-      setStage(Number(data.stage) || 2);
+      titleEl.textContent = stage.label || 'On the way';
+      subEl.textContent = stage.subtitle || 'Your cargo is on delivery.';
+      setProgress(stage.step || 2);
 
-      reasonEl.textContent = data.reason || '—';
-      itemsCountEl.textContent = String(data.totals?.itemsCount ?? '—');
-      totalQtyEl.textContent = String(data.totals?.totalQty ?? '—');
-      estimateTotalEl.textContent = formatMoney(data.totals?.estimateTotal ?? 0);
+      etaEl.textContent = fmtHHMM(data.eta);
 
-      // ETA: prefer explicit ETA prop; fallback to created time (time only)
-      const etaValue = data.eta || data.createdTime;
-      etaEl.textContent = formatTimeForUI(etaValue);
-
-      // Render items list (optional)
-      const items = Array.isArray(data.items) ? data.items : [];
-      if (!itemsEl) return;
-
-      if (items.length === 0) {
-        itemsEl.innerHTML = '';
-      } else {
-        itemsEl.innerHTML = items.map((it) => {
-          const status = String(it.status || 'Pending');
-          const st = status.toLowerCase();
-          const cls = st.includes('received') && !st.includes('not received') ? 'ok' : 'wait';
-
-          return `
-            <div class="trk-item">
-              <div>
-                <div class="name">${escapeHTML(it.productName || 'Unknown Product')}</div>
-                <div class="meta">Qty: ${Number(it.quantity) || 0}</div>
-              </div>
-              <div class="trk-pill-status ${cls}">${escapeHTML(status)}</div>
-            </div>
-          `;
-        }).join('');
+      if (metaEl) {
+        const c = data.summary?.itemsCount ?? data.items?.length ?? 0;
+        const q = data.summary?.totalQuantity ?? 0;
+        const total = data.summary?.estimateTotal ?? 0;
+        metaEl.textContent = `${c} item${c === 1 ? '' : 's'} • Total qty: ${q} • Estimate: ${fmtMoney(total)}`;
       }
 
-      if (window.feather) feather.replace();
+      renderItems(data.items);
+
+      if (window.feather) window.feather.replace();
     } catch (e) {
       console.error(e);
       titleEl.textContent = 'Error';
-      subEl.textContent = e.message || 'Failed to load tracking info';
-      etaEl.textContent = '--:--';
-      setStage(1);
+      subEl.textContent = e.message || 'Failed to load tracking.';
+      setProgress(1);
     }
   }
 
-  load();
+  loadTracking();
 });
