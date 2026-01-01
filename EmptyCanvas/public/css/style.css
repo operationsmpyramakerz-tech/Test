@@ -653,6 +653,179 @@ body.sidebar-collapsed .sidebar-toggle svg{ transform:rotate(180deg); }
   .co-status-btn{ padding: 12px 18px; }
 }
 
+/* =================================
+   Current Orders — Order Details Modal
+   ================================= */
+body.co-modal-open{ overflow: hidden; }
+
+.co-modal-overlay{
+  position: fixed;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0,0,0,.45);
+  z-index: 1100;
+}
+
+.co-modal-overlay.is-open{ display: flex; }
+
+.co-modal-dialog{
+  width: min(720px, 96vw);
+  max-height: 88vh;
+  overflow: auto;
+  background: #fff;
+  border: 1px solid #E5E7EB;
+  border-radius: 26px;
+  box-shadow: 0 24px 60px rgba(0,0,0,.18);
+  padding: 18px 18px 16px;
+  position: relative;
+}
+
+.co-modal-close{
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 44px;
+  height: 44px;
+  border-radius: 999px;
+  border: 0;
+  background: #F3F4F6;
+  color: #111827;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.co-modal-close:hover{ background: #E5E7EB; }
+.co-modal-close svg{ width: 20px; height: 20px; }
+
+.co-modal-status{
+  font-size: 44px;
+  font-weight: 900;
+  color: #111827;
+  line-height: 1.05;
+  padding-right: 52px; /* space for close button */
+}
+
+.co-modal-status-sub{
+  margin-top: 8px;
+  font-size: 16px;
+  color: #6B7280;
+}
+
+.co-track-pill{
+  margin-top: 18px;
+  background: #111827;
+  border-radius: 999px;
+  padding: 18px 18px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.co-track-step{
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.22);
+  color: rgba(255,255,255,0.6);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.co-track-step svg{ width: 22px; height: 22px; }
+
+.co-track-step.is-active{
+  background: #D9F99D;
+  color: #111827;
+}
+
+.co-track-step.is-current{
+  box-shadow: 0 0 0 4px rgba(217,249,157,0.22);
+}
+
+.co-track-conn{
+  flex: 1;
+  height: 14px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.22);
+}
+
+.co-track-conn.is-active{ background: #D9F99D; }
+
+.co-modal-body{
+  margin-top: 18px;
+  display: grid;
+  gap: 16px;
+}
+
+.co-modal-meta{
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 14px;
+  background: #F9FAFB;
+  border: 1px solid #E5E7EB;
+  border-radius: 16px;
+  padding: 14px;
+}
+
+.co-meta-row{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 14px;
+}
+
+.co-meta-row span{ color: #6B7280; }
+.co-meta-row strong{ color: #111827; font-weight: 900; }
+
+.co-modal-items{ display: grid; gap: 10px; }
+
+.co-item{
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid #E5E7EB;
+  border-radius: 16px;
+  padding: 12px 14px;
+  background: #fff;
+  box-shadow: 0 10px 24px rgba(0,0,0,.06);
+}
+
+.co-item-name{ font-weight: 900; color: #111827; }
+.co-item-sub{ margin-top: 4px; color: #6B7280; font-size: 13px; }
+
+.co-item-right{ text-align: right; flex-shrink: 0; }
+.co-item-total{ font-weight: 900; color: #111827; }
+
+.co-item-status{
+  margin-top: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 900;
+  background: #111827;
+  color: #fff;
+}
+
+@media (max-width: 560px){
+  .co-modal-status{ font-size: 34px; }
+  .co-modal-meta{ grid-template-columns: 1fr; }
+  .co-track-pill{ padding: 16px 14px; gap: 8px; }
+  .co-track-step{ width: 48px; height: 48px; }
+  .co-track-conn{ height: 12px; }
+}
+
 .sidebar-footer .nav-link{ width:100%; margin-bottom:0; }
 
 .create-order-layout{ grid-template-columns:2fr 1fr; gap:2rem; align-items:start; }
