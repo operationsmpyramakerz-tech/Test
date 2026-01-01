@@ -3594,135 +3594,138 @@ body.sidebar-mini .sidebar-footer .account-mini .label{
 
 
 /* =========================================================
-   Current Orders — card layout (requested to match ref image #1)
+   Current Orders — cards UI (match ref image)
    Scoped to #current-orders only.
    ========================================================= */
-/* Remove the outer "section.card" chrome so the order cards feel like
-   the reference mobile UI (cards directly on the page background). */
-#current-orders.card{
-  background: transparent;
-  box-shadow: none;
+
+/* The page should feel like the reference: cards on the page background,
+   not inside a large generic white panel. */
+#current-orders{
   padding: 0;
-  border: 0;
 }
 
 #current-orders .co-grid{
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 16px;
-  max-width: 720px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  max-width: 760px;
   margin: 0 auto;
 }
-
-/* Keep 1-column like the reference; wide screens still look clean. */
 
 #current-orders .co-card{
   background: #ffffff;
   border: 1px solid #F3F4F6;
-  border-radius: 22px;
-  padding: 18px 18px 16px;
+  border-radius: 28px;
+  padding: 18px;
   box-shadow: 0 14px 30px rgba(0,0,0,.08);
   cursor: pointer;
   transition: transform .12s ease, box-shadow .12s ease;
 }
 #current-orders .co-card:hover{
   transform: translateY(-2px);
-  box-shadow: 0 16px 30px rgba(0,0,0,.08);
+  box-shadow: 0 18px 34px rgba(0,0,0,.10);
 }
 #current-orders .co-card:focus-visible{
   outline: 3px solid rgba(37, 99, 235, 0.25);
-  outline-offset: 2px;
+  outline-offset: 3px;
 }
 
-#current-orders .co-row{
+/* Top row */
+#current-orders .co-top{
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 16px;
 }
 
 #current-orders .co-thumb{
-  width: 74px;
-  height: 74px;
-  border-radius: 18px;
+  width: 86px;
+  height: 86px;
+  border-radius: 22px;
   overflow: hidden;
   background: #F3F4F6;
-  border: 1px solid #F3F4F6;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  border: 1px solid #EEF2F7;
+  display: grid;
+  place-items: center;
   flex-shrink: 0;
 }
 #current-orders .co-thumb img{
   width: 100%;
   height: 100%;
   object-fit: cover;
+  display: block;
 }
 #current-orders .co-thumb-text{
-  font-weight: 900;
-  color: #374151;
+  font-weight: 950;
+  color: #111827;
+  letter-spacing: .5px;
 }
 
-#current-orders .co-info{
+#current-orders .co-main{
   flex: 1;
   min-width: 0;
-}
-#current-orders .co-title{
-  font-weight: 900;
-  font-size: 1.05rem;
-  color: #111827;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-#current-orders .co-meta{
-  margin-top: 4px;
-  font-size: .85rem;
-  color: #6B7280;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-#current-orders .co-product{
-  margin-top: 10px;
-  font-weight: 800;
-  color: #111827;
-  overflow-wrap: anywhere;
-}
-#current-orders .co-more{
-  display: inline-block;
-  margin-left: 8px;
-  font-size: .85rem;
-  color: #6B7280;
-  font-weight: 700;
+  display: flex;
+  flex-direction: column;
 }
 
-#current-orders .co-count{
-  margin-left: auto;
-  font-weight: 900;
+#current-orders .co-name{
+  font-weight: 950;
   color: #111827;
-  opacity: .8;
+  font-size: 1.35rem;
+  line-height: 1.15;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#current-orders .co-sub{
+  margin-top: 6px;
+  font-size: 0.95rem;
+  color: #9CA3AF;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#current-orders .co-price{
+  margin-top: 12px;
+  font-size: 1.45rem;
+  font-weight: 950;
+  color: #111827;
+}
+
+#current-orders .co-qty{
+  margin-left: auto;
+  color: #9CA3AF;
+  font-weight: 800;
+  font-size: 1.15rem;
   flex-shrink: 0;
 }
 
-#current-orders .co-sep{
+/* Divider */
+#current-orders .co-divider{
   height: 1px;
-  background: #F3F4F6;
-  margin: 14px 0 12px;
+  background: #EEF2F7;
+  margin: 16px 0;
 }
 
+/* Bottom row */
 #current-orders .co-bottom{
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 14px;
   flex-wrap: wrap;
 }
-#current-orders .co-total-label{
-  font-size: .85rem;
-  color: #6B7280;
+
+#current-orders .co-est-label{
+  font-size: 0.95rem;
+  color: #9CA3AF;
+  font-weight: 700;
 }
-#current-orders .co-total-value{
-  font-size: 1.25rem;
+#current-orders .co-est-value{
+  margin-top: 6px;
+  font-size: 1.6rem;
   font-weight: 950;
   color: #111827;
 }
@@ -3730,36 +3733,52 @@ body.sidebar-mini .sidebar-footer .account-mini .label{
 #current-orders .co-actions{
   display: inline-flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
 }
 
-#current-orders .co-status-btn{
-  padding: 12px 18px;
+/* Pill button */
+#current-orders .co-pill{
+  min-height: 48px;
+  padding: 0 22px;
   border-radius: 999px;
-  background: #111827;
-  color: #ffffff;
   font-weight: 900;
-  font-size: .92rem;
-  white-space: nowrap;
-  min-height: 44px;
+  font-size: 1rem;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  white-space: nowrap;
 }
-#current-orders .co-status-btn.is-done{ background: #16A34A; }
-
-/* Small circular icon button like the reference (%). */
-#current-orders .co-icon-btn{
-  width: 44px;
-  height: 44px;
-  border-radius: 999px;
+#current-orders .co-pill.is-active{
   background: #111827;
   color: #ffffff;
+  border: 2px solid #111827;
+}
+#current-orders .co-pill.is-muted{
+  background: transparent;
+  color: #9CA3AF;
+  border: 2px solid #E5E7EB;
+}
+
+/* Circular % button */
+#current-orders .co-percent{
+  width: 48px;
+  height: 48px;
+  border-radius: 999px;
   font-weight: 950;
   font-size: 18px;
   display: grid;
   place-items: center;
   user-select: none;
+}
+#current-orders .co-percent.is-active{
+  background: #111827;
+  color: #ffffff;
+  border: 2px solid #111827;
+}
+#current-orders .co-percent.is-muted{
+  background: transparent;
+  color: #9CA3AF;
+  border: 2px solid #E5E7EB;
 }
 
 /* =========================================================
