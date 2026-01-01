@@ -138,7 +138,9 @@
 </div>
 </header>
 <main class="container-full-width">
-<section class="card" id="current-orders">
+<!-- NOTE: We intentionally removed the generic `.card` wrapper here so the
+     order cards can match the reference UI (cards directly on the background). -->
+<section id="current-orders" class="current-orders-shell">
 <div id="orders-list">
 <p><i class="loading-icon" data-feather="loader"></i> Loading orders...</p>
 </div>
