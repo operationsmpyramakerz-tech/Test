@@ -90,9 +90,19 @@ document.addEventListener('DOMContentLoaded', function () {
         group.products[0] ||
         {};
 
-      const createdTime = new Date(group.latestCreated).toLocaleString('en-US', {
-        year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+      const createdDate = new Date(group.latestCreated).toLocaleDateString('en-US', {
+        year: 'numeric', month: 'short', day: 'numeric'
       });
+
+      // In the reference UI the top price is a "unit price" and the bottom value is
+      // the estimated total. We try to display the first item's unit price when available.
+      const unitPrice = (() => {
+        const n = Number(preview.unitPrice);
+        if (Number.isFinite(n) && n >= 0) return n;
+        const qty = totalQty || 0;
+        if (Number.isFinite(estimateTotal) && qty > 0) return estimateTotal / qty;
+        return 0;
+      })();
 
       const thumbTextRaw = String(preview.productName || group.reason || 'O').trim();
       const thumbText = thumbTextRaw ? thumbTextRaw.slice(0, 2).toUpperCase() : 'O';
@@ -104,8 +114,15 @@ document.addEventListener('DOMContentLoaded', function () {
       card.setAttribute('aria-label', `Open tracking for ${group.reason}`);
       card.dataset.groupId = group.groupId;
 
+      const actionStateClass = allReceived ? 'is-active' : 'is-muted';
+
+      const titleText = String(preview.productName || group.reason || '').trim();
+      const subText = preview.productName
+        ? `Reason : ${group.reason || ''}`
+        : `Created : ${createdDate}`;
+
       card.innerHTML = `
-        <div class="co-row">
+        <div class="co-top">
           <div class="co-thumb">
             ${
               preview.productImage
@@ -114,31 +131,26 @@ document.addEventListener('DOMContentLoaded', function () {
             }
           </div>
 
-          <div class="co-info">
-            <div class="co-title">${escapeHTML(group.reason)}</div>
-            <div class="co-meta">Created: ${createdTime} • ${itemsCount} item${itemsCount === 1 ? '' : 's'}</div>
-            <div class="co-product">
-              ${escapeHTML(preview.productName || '')}
-              ${itemsCount > 1 ? `<span class="co-more">+${itemsCount - 1} more</span>` : ''}
-            </div>
+          <div class="co-main">
+            <div class="co-name">${escapeHTML(titleText)}</div>
+            <div class="co-sub">${escapeHTML(subText)}</div>
+            <div class="co-price">${formatMoney(unitPrice)}</div>
           </div>
 
-          <div class="co-count">x${totalQty}</div>
+          <div class="co-qty">x${totalQty}</div>
         </div>
 
-        <div class="co-sep"></div>
+        <div class="co-divider"></div>
 
         <div class="co-bottom">
-          <div class="co-total">
-            <div class="co-total-label">Estimate Total</div>
-            <div class="co-total-value">${formatMoney(estimateTotal)}</div>
+          <div class="co-est">
+            <div class="co-est-label">Estimate Total</div>
+            <div class="co-est-value">${formatMoney(estimateTotal)}</div>
           </div>
 
           <div class="co-actions">
-            <div class="co-status-btn ${allReceived ? 'is-done' : ''}">
-              ${escapeHTML(statusText)}
-            </div>
-            <div class="co-icon-btn" aria-hidden="true">%</div>
+            <div class="co-pill ${actionStateClass}">${escapeHTML(statusText)}</div>
+            <div class="co-percent ${actionStateClass}" aria-hidden="true">%</div>
           </div>
         </div>
       `;
