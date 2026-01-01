@@ -413,15 +413,9 @@ app.get("/orders", requireAuth, requirePage("Current Orders"), (req, res) => {
   res.sendFile(path.join(__dirname, "..", "public", "current-orders.html"));
 });
 
-// Order tracking page (opened from Current Orders cards)
-app.get(
-  "/orders/tracking",
-  requireAuth,
-  requirePage("Current Orders"),
-  (req, res) => {
-    res.sendFile(path.join(__dirname, "..", "public", "order-tracking.html"));
-  },
-);
+app.get("/orders/tracking", requireAuth, requirePage("Current Orders"), (req, res) => {
+  res.sendFile(path.join(__dirname, "..", "public", "order-tracking.html"));
+});
 
 app.get(
   "/orders/requested",
@@ -466,11 +460,8 @@ app.get(
   requireAuth,
   requirePage("Create New Order"),
   (req, res) => {
-    const d = req.session.orderDraft || {};
-    if (!Array.isArray(d.products) || d.products.length === 0) {
-      return res.redirect("/orders/new/products");
-    }
-    res.sendFile(path.join(__dirname, "..", "public", "create-order-review.html"));
+    // Review step removed — Checkout now submits directly from Products page
+    return res.redirect("/orders/new/products");
   },
 );
 
@@ -745,80 +736,6 @@ app.get(
       }
       const userId = userQuery.results[0].id;
 
-      // Cache product lookups to avoid repeated Notion calls
-      const productCache = new Map();
-
-      const numberFromProp = (prop) => {
-        if (!prop) return undefined;
-
-        // number
-        if (typeof prop.number === "number") return prop.number;
-
-        // formula
-        if (prop.formula && typeof prop.formula.number === "number") {
-          return prop.formula.number;
-        }
-
-        // rollup
-        if (prop.rollup) {
-          if (typeof prop.rollup.number === "number") return prop.rollup.number;
-          if (prop.rollup.type === "array" && Array.isArray(prop.rollup.array)) {
-            // find first number-like element
-            for (const el of prop.rollup.array) {
-              if (el && typeof el.number === "number") return el.number;
-              if (el && el.formula && typeof el.formula.number === "number") return el.formula.number;
-            }
-          }
-        }
-
-        return undefined;
-      };
-
-      const coverUrlFromPage = (p) => {
-        const cover = p?.cover;
-        if (cover?.type === "external") return cover.external?.url || null;
-        if (cover?.type === "file") return cover.file?.url || null;
-        const icon = p?.icon;
-        if (icon?.type === "file") return icon.file?.url || null;
-        return null;
-      };
-
-      const findUnitPriceProp = (props) => {
-        if (!props) return null;
-        return (
-          props["Unity Price"] ||
-          props["Unit price"] ||
-          props["Unit Price"] ||
-          props["Unit price "] ||
-          Object.entries(props).find(([k]) => {
-            const nk = normKey(k);
-            return nk === "unityprice" || nk === "unitprice";
-          })?.[1] ||
-          null
-        );
-      };
-
-      const getProductInfo = async (productId) => {
-        if (!productId) return { productName: "Unknown Product", unitPrice: 0, productImage: null };
-        if (productCache.has(productId)) return productCache.get(productId);
-
-        try {
-          const productPage = await notion.pages.retrieve({ page_id: productId });
-          const props = productPage.properties || {};
-          const productName = props?.Name?.title?.[0]?.plain_text || "Unknown Product";
-          const unitPrice = numberFromProp(findUnitPriceProp(props)) ?? 0;
-          const productImage = coverUrlFromPage(productPage);
-          const info = { productName, unitPrice, productImage };
-          productCache.set(productId, info);
-          return info;
-        } catch (e) {
-          console.error("Could not retrieve related product page:", e.body || e.message);
-          const info = { productName: "Unknown Product", unitPrice: 0, productImage: null };
-          productCache.set(productId, info);
-          return info;
-        }
-      };
-
       const allOrders = [];
       let hasMore = true;
       let startCursor = undefined;
@@ -832,20 +749,96 @@ app.get(
         });
 
         for (const page of response.results) {
-          const productRelation = page.properties.Product?.relation;
-          const productId = (productRelation && productRelation[0] && productRelation[0].id) ? productRelation[0].id : null;
+                    const productRelation = page.properties.Product?.relation;
+          let productName = "Unknown Product";
+          let unitPrice = null;
+          let productImage = null;
 
-          const pInfo = await getProductInfo(productId);
+          // Helper to safely extract numbers from Notion props (number / formula / rollup / rich_text)
+          const parseNumberProp = (prop) => {
+            if (!prop) return null;
+            try {
+              if (prop.type === "number") return prop.number ?? null;
 
-          allOrders.push({
+              if (prop.type === "formula") {
+                if (prop.formula?.type === "number") return prop.formula.number ?? null;
+                if (prop.formula?.type === "string") {
+                  const n = parseFloat(String(prop.formula.string || "").replace(/[^0-9.]/g, ""));
+                  return Number.isFinite(n) ? n : null;
+                }
+              }
+
+              if (prop.type === "rollup") {
+                if (prop.rollup?.type === "number") return prop.rollup.number ?? null;
+
+                if (prop.rollup?.type === "array") {
+                  const arr = prop.rollup.array || [];
+                  for (const x of arr) {
+                    if (x.type === "number" && typeof x.number === "number") return x.number;
+                    if (x.type === "formula" && x.formula?.type === "number") return x.formula.number;
+                    if (x.type === "formula" && x.formula?.type === "string") {
+                      const n = parseFloat(String(x.formula.string || "").replace(/[^0-9.]/g, ""));
+                      if (Number.isFinite(n)) return n;
+                    }
+                    if (x.type === "rich_text") {
+                      const t = (x.rich_text || []).map(r => r.plain_text).join("").trim();
+                      const n = parseFloat(t.replace(/[^0-9.]/g, ""));
+                      if (Number.isFinite(n)) return n;
+                    }
+                  }
+                }
+              }
+
+              if (prop.type === "rich_text") {
+                const t = (prop.rich_text || []).map(r => r.plain_text).join("").trim();
+                const n = parseFloat(t.replace(/[^0-9.]/g, ""));
+                return Number.isFinite(n) ? n : null;
+              }
+            } catch {}
+            return null;
+          };
+
+          if (productRelation && productRelation.length > 0) {
+            try {
+              const productPage = await notion.pages.retrieve({
+                page_id: productRelation[0].id,
+              });
+
+              productName =
+                productPage.properties?.Name?.title?.[0]?.plain_text ||
+                "Unknown Product";
+
+              // Price in Products_Database is a Number named "Unity Price"
+              unitPrice =
+                parseNumberProp(productPage.properties?.["Unity Price"]) ??
+                parseNumberProp(productPage.properties?.["Unit price"]) ??
+                parseNumberProp(productPage.properties?.["Unit Price"]) ??
+                parseNumberProp(productPage.properties?.["Price"]) ??
+                null;
+
+              // Use Notion cover/icon as a lightweight product image if present
+              if (productPage.cover?.type === "external") productImage = productPage.cover.external.url;
+              if (productPage.cover?.type === "file") productImage = productPage.cover.file.url;
+              if (!productImage && productPage.icon?.type === "external") productImage = productPage.icon.external.url;
+              if (!productImage && productPage.icon?.type === "file") productImage = productPage.icon.file.url;
+            } catch (e) {
+              console.error(
+                "Could not retrieve related product page:",
+                e.body || e.message,
+              );
+            }
+          }
+
+allOrders.push({
             id: page.id,
-            reason: page.properties?.Reason?.title?.[0]?.plain_text || "No Reason",
-            productId,
-            productName: pInfo.productName,
-            productImage: pInfo.productImage,
-            unitPrice: pInfo.unitPrice,
+            reason:
+              page.properties?.Reason?.title?.[0]?.plain_text || "No Reason",
+            productName,
+            productImage,
+            unitPrice,
             quantity: page.properties?.["Quantity Requested"]?.number || 0,
-            status: page.properties?.["Status"]?.select?.name || "Pending",
+            status:
+              page.properties?.["Status"]?.select?.name || "Pending",
             createdTime: page.created_time,
           });
         }
@@ -878,8 +871,8 @@ app.get(
   },
 );
 
-// Order tracking details (for a "group" opened from Current Orders cards)
-// groupId = Notion page id of one item inside Products_list
+
+// Order Tracking (Current Orders) — fetch a whole "order group" by representative page id
 app.get(
   "/api/orders/tracking",
   requireAuth,
@@ -890,161 +883,221 @@ app.get(
     }
 
     const groupIdRaw = req.query.groupId;
-    if (!groupIdRaw) return res.status(400).json({ error: "Missing groupId" });
+    if (!groupIdRaw || !looksLikeNotionId(groupIdRaw)) {
+      return res.status(400).json({ error: "Missing or invalid groupId." });
+    }
     const groupId = toHyphenatedUUID(groupIdRaw);
 
+    res.set("Cache-Control", "no-store");
+
     try {
-      // Resolve current user Notion page id
+      // Find current user
       const userQuery = await notion.databases.query({
         database_id: teamMembersDatabaseId,
         filter: { property: "Name", title: { equals: req.session.username } },
       });
-      if (userQuery.results.length === 0) return res.status(404).json({ error: "User not found." });
+      if (userQuery.results.length === 0) {
+        return res.status(404).json({ error: "User not found." });
+      }
       const userId = userQuery.results[0].id;
 
-      // Fetch the clicked order page and validate access
-      const groupPage = await notion.pages.retrieve({ page_id: groupId });
-      const groupProps = groupPage.properties || {};
-      const rel = groupProps?.["Teams Members"]?.relation || [];
-      const allowed = Array.isArray(rel) && rel.some((r) => r?.id === userId);
-      if (!allowed) return res.status(403).json({ error: "Not allowed." });
+      // Retrieve a reference order page to extract the Reason/title
+      let basePage;
+      try {
+        basePage = await notion.pages.retrieve({ page_id: groupId });
+      } catch (e) {
+        return res.status(404).json({ error: "Order not found." });
+      }
 
-      const reason = groupProps?.Reason?.title?.[0]?.plain_text || "No Reason";
+      // Ensure it belongs to the Orders DB (best-effort safety)
+      const parentDb = basePage.parent?.database_id;
+      if (parentDb && normalizeNotionId(parentDb) !== normalizeNotionId(ordersDatabaseId)) {
+        return res.status(404).json({ error: "Order not found." });
+      }
 
-      // Cache product lookups for this request
-      const productCache = new Map();
-      const numberFromProp = (prop) => {
-        if (!prop) return undefined;
-        if (typeof prop.number === "number") return prop.number;
-        if (prop.formula && typeof prop.formula.number === "number") return prop.formula.number;
-        if (prop.rollup) {
-          if (typeof prop.rollup.number === "number") return prop.rollup.number;
-          if (prop.rollup.type === "array" && Array.isArray(prop.rollup.array)) {
-            for (const el of prop.rollup.array) {
-              if (el && typeof el.number === "number") return el.number;
-              if (el && el.formula && typeof el.formula.number === "number") return el.formula.number;
+      const reason =
+        basePage.properties?.Reason?.title?.[0]?.plain_text || "No Reason";
+
+      // Helpers
+      const parseNumberProp = (prop) => {
+        if (!prop) return null;
+        try {
+          if (prop.type === "number") return prop.number ?? null;
+
+          if (prop.type === "formula") {
+            if (prop.formula?.type === "number") return prop.formula.number ?? null;
+            if (prop.formula?.type === "string") {
+              const n = parseFloat(String(prop.formula.string || "").replace(/[^0-9.]/g, ""));
+              return Number.isFinite(n) ? n : null;
             }
           }
-        }
-        return undefined;
-      };
-      const coverUrlFromPage = (p) => {
-        const cover = p?.cover;
-        if (cover?.type === "external") return cover.external?.url || null;
-        if (cover?.type === "file") return cover.file?.url || null;
-        const icon = p?.icon;
-        if (icon?.type === "file") return icon.file?.url || null;
+
+          if (prop.type === "rollup") {
+            if (prop.rollup?.type === "number") return prop.rollup.number ?? null;
+
+            if (prop.rollup?.type === "array") {
+              const arr = prop.rollup.array || [];
+              for (const x of arr) {
+                if (x.type === "number" && typeof x.number === "number") return x.number;
+                if (x.type === "formula" && x.formula?.type === "number") return x.formula.number;
+                if (x.type === "formula" && x.formula?.type === "string") {
+                  const n = parseFloat(String(x.formula.string || "").replace(/[^0-9.]/g, ""));
+                  if (Number.isFinite(n)) return n;
+                }
+                if (x.type === "rich_text") {
+                  const t = (x.rich_text || []).map(r => r.plain_text).join("").trim();
+                  const n = parseFloat(t.replace(/[^0-9.]/g, ""));
+                  if (Number.isFinite(n)) return n;
+                }
+              }
+            }
+          }
+
+          if (prop.type === "rich_text") {
+            const t = (prop.rich_text || []).map(r => r.plain_text).join("").trim();
+            const n = parseFloat(t.replace(/[^0-9.]/g, ""));
+            return Number.isFinite(n) ? n : null;
+          }
+        } catch {}
         return null;
       };
-      const findUnitPriceProp = (props) => {
-        if (!props) return null;
-        return (
-          props["Unity Price"] ||
-          props["Unit price"] ||
-          props["Unit Price"] ||
-          Object.entries(props).find(([k]) => {
-            const nk = normKey(k);
-            return nk === "unityprice" || nk === "unitprice";
-          })?.[1] ||
-          null
-        );
-      };
-      const getProductInfo = async (productId) => {
-        if (!productId) return { productName: "Unknown Product", unitPrice: 0, productImage: null };
-        if (productCache.has(productId)) return productCache.get(productId);
+
+      const tryEtaProp = (prop) => {
+        if (!prop) return null;
         try {
-          const productPage = await notion.pages.retrieve({ page_id: productId });
-          const props = productPage.properties || {};
-          const productName = props?.Name?.title?.[0]?.plain_text || "Unknown Product";
-          const unitPrice = numberFromProp(findUnitPriceProp(props)) ?? 0;
-          const productImage = coverUrlFromPage(productPage);
-          const info = { productName, unitPrice, productImage };
-          productCache.set(productId, info);
+          if (prop.type === "date") return prop.date?.start || null;
+          if (prop.type === "rich_text") {
+            const t = (prop.rich_text || []).map(r => r.plain_text).join("").trim();
+            return t || null;
+          }
+          if (prop.type === "formula") {
+            if (prop.formula?.type === "string") return prop.formula.string || null;
+            if (prop.formula?.type === "date") return prop.formula.date?.start || null;
+          }
+        } catch {}
+        return null;
+      };
+
+      const eta =
+        tryEtaProp(basePage.properties?.["Estimated delivery time"]) ??
+        tryEtaProp(basePage.properties?.["Estimated Delivery Time"]) ??
+        tryEtaProp(basePage.properties?.["ETA"]) ??
+        tryEtaProp(basePage.properties?.["Delivery time"]) ??
+        null;
+
+      // Collect all items for the same Reason (scoped to the current user)
+      const items = [];
+      let hasMore = true;
+      let startCursor = undefined;
+
+      const productCache = new Map();
+      async function getProductInfo(productPageId) {
+        if (!productPageId) return { name: "Unknown Product", unitPrice: null, image: null };
+        if (productCache.has(productPageId)) return productCache.get(productPageId);
+
+        try {
+          const productPage = await notion.pages.retrieve({ page_id: productPageId });
+          const name =
+            productPage.properties?.Name?.title?.[0]?.plain_text || "Unknown Product";
+
+          const unitPrice =
+            parseNumberProp(productPage.properties?.["Unity Price"]) ??
+            parseNumberProp(productPage.properties?.["Unit price"]) ??
+            parseNumberProp(productPage.properties?.["Unit Price"]) ??
+            parseNumberProp(productPage.properties?.["Price"]) ??
+            null;
+
+          let image = null;
+          if (productPage.cover?.type === "external") image = productPage.cover.external.url;
+          if (productPage.cover?.type === "file") image = productPage.cover.file.url;
+          if (!image && productPage.icon?.type === "external") image = productPage.icon.external.url;
+          if (!image && productPage.icon?.type === "file") image = productPage.icon.file.url;
+
+          const info = { name, unitPrice, image };
+          productCache.set(productPageId, info);
           return info;
         } catch (e) {
-          const info = { productName: "Unknown Product", unitPrice: 0, productImage: null };
-          productCache.set(productId, info);
+          const info = { name: "Unknown Product", unitPrice: null, image: null };
+          productCache.set(productPageId, info);
           return info;
         }
-      };
+      }
 
-      // Query all items with same Reason for this user
-      const q = await notion.databases.query({
-        database_id: ordersDatabaseId,
-        filter: {
-          and: [
-            { property: "Teams Members", relation: { contains: userId } },
-            { property: "Reason", title: { equals: reason } },
-          ],
-        },
-        sorts: [{ timestamp: "created_time", direction: "descending" }],
-      });
-
-      const items = [];
-      for (const page of q.results || []) {
-        const productRelation = page.properties.Product?.relation;
-        const productId = (productRelation && productRelation[0] && productRelation[0].id) ? productRelation[0].id : null;
-        const pInfo = await getProductInfo(productId);
-        items.push({
-          id: page.id,
-          productId,
-          productName: pInfo.productName,
-          productImage: pInfo.productImage,
-          unitPrice: pInfo.unitPrice,
-          quantity: page.properties?.["Quantity Requested"]?.number || 0,
-          status: page.properties?.["Status"]?.select?.name || "Pending",
-          createdTime: page.created_time,
+      while (hasMore) {
+        const response = await notion.databases.query({
+          database_id: ordersDatabaseId,
+          start_cursor: startCursor,
+          filter: {
+            and: [
+              { property: "Teams Members", relation: { contains: userId } },
+              { property: "Reason", title: { equals: reason } },
+            ],
+          },
+          sorts: [{ timestamp: "created_time", direction: "descending" }],
         });
+
+        for (const page of response.results) {
+          const productRelation = page.properties.Product?.relation;
+          const productPageId =
+            productRelation && productRelation.length > 0
+              ? productRelation[0].id
+              : null;
+
+          const prod = await getProductInfo(productPageId);
+
+          items.push({
+            id: page.id,
+            productName: prod.name,
+            productImage: prod.image,
+            unitPrice: prod.unitPrice,
+            quantity: page.properties?.["Quantity Requested"]?.number || 0,
+            status: page.properties?.["Status"]?.select?.name || "Pending",
+            createdTime: page.created_time,
+          });
+        }
+
+        hasMore = response.has_more;
+        startCursor = response.next_cursor;
       }
 
-      const statuses = items.map((it) => norm(it.status));
-      const deliveredSet = new Set(["received", "delivered"]);
-      const onTheWaySet = new Set([
-        "prepared",
-        "on the way",
-        "ontheway",
-        "on_the_way",
-        "shipped",
-        "delivering",
-      ]);
+      const st = (s) => String(s || "").toLowerCase();
+      const allReceived =
+        items.length > 0 && items.every((i) => st(i.status).includes("received"));
 
-      let stage = { step: 1, label: "Order Received", subtitle: "We’ve received your order." };
-      if (statuses.length > 0 && statuses.every((s) => deliveredSet.has(s))) {
-        stage = { step: 3, label: "Delivered", subtitle: "Your cargo has been delivered." };
-      } else if (statuses.some((s) => onTheWaySet.has(s))) {
-        stage = { step: 2, label: "On the way", subtitle: "Your cargo is on delivery." };
-      }
+      // Stage mapping (keeps UI consistent with your reference screenshots)
+      // 1: Order placed, 2: On the way, 3: Delivered
+      const stage = allReceived ? 3 : 2;
 
-      const totalQuantity = items.reduce((sum, it) => sum + (Number(it.quantity) || 0), 0);
-      const estimateTotal = items.reduce((sum, it) => sum + (Number(it.quantity) || 0) * (Number(it.unitPrice) || 0), 0);
+      const headerTitle = stage === 3 ? "Delivered" : "On the way";
+      const headerSubtitle = stage === 3 ? "Your cargo has arrived." : "Your cargo is on delivery.";
 
-      // Try to read ETA from a date property if it exists; otherwise fallback
-      let etaISO = null;
-      for (const [k, v] of Object.entries(groupProps)) {
-        if (!/eta|estimated.*delivery|delivery.*time/i.test(String(k))) continue;
-        if (v?.type === "date" && v.date?.start) { etaISO = v.date.start; break; }
-      }
-      if (!etaISO) {
-        const base = new Date(groupPage.created_time);
-        const addHours = stage.step === 1 ? 2 : stage.step === 2 ? 1 : 0;
-        etaISO = new Date(base.getTime() + addHours * 60 * 60 * 1000).toISOString();
-      }
+      const estimateTotal = items.reduce((sum, it) => {
+        const p = Number(it.unitPrice);
+        const q = Number(it.quantity);
+        if (!Number.isFinite(p) || !Number.isFinite(q)) return sum;
+        return sum + p * q;
+      }, 0);
+
+      const totalQty = items.reduce((sum, it) => sum + (Number(it.quantity) || 0), 0);
 
       return res.json({
         groupId,
         reason,
+        createdTime: basePage.created_time,
         stage,
-        eta: etaISO,
-        summary: {
+        headerTitle,
+        headerSubtitle,
+        eta,
+        totals: {
           itemsCount: items.length,
-          totalQuantity,
+          totalQty,
           estimateTotal,
         },
         items,
       });
     } catch (error) {
-      console.error("Tracking error:", error.body || error);
-      return res.status(500).json({ error: "Failed to load tracking." });
+      console.error("Error fetching tracking data:", error.body || error);
+      return res.status(500).json({ error: "Failed to fetch tracking data." });
     }
   },
 );
@@ -1882,6 +1935,263 @@ app.get(
     const allComponents = [];
     let hasMore = true;
     let startCursor = undefined;
+
+    // ---- helpers: safely extract number/file url/... ----
+    // NOTE:
+    // - Pricing in Products_Database is expected to be a Number property ("Unity Price").
+    // - Some workspaces may also have a legacy/alternate name like "Unit price".
+    const normKeyLocal = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const getPropInsensitive = (props, name) => {
+      if (!props) return null;
+      if (props[name]) return props[name];
+      const want = normKeyLocal(name);
+      for (const k of Object.keys(props)) {
+        if (normKeyLocal(k) === want) return props[k];
+      }
+      return null;
+    };
+
+    const extractFirstFileUrl = (prop) => {
+      try {
+        if (!prop) return null;
+        // Notion files property
+        if (prop.type === 'files') {
+          const f = prop.files?.[0];
+          if (!f) return null;
+          if (f.type === 'file') return f.file?.url || null;
+          if (f.type === 'external') return f.external?.url || null;
+          return null;
+        }
+        // sometimes stored as url property
+        if (prop.type === 'url') return prop.url || null;
+        return null;
+      } catch {
+        return null;
+      }
+    };
+
+    const extractNumber = (prop) => {
+      try {
+        if (!prop) return null;
+
+        // Some Notion setups store currency/price as text (e.g. "£40.00")
+        // and/or rollup arrays of text values. We try to parse a number from
+        // those cases so the UI doesn't show $0.
+        const parseNumberFromText = (text) => {
+          if (text == null) return null;
+          let s = String(text).trim();
+          if (!s) return null;
+          // Remove spaces
+          s = s.replace(/\s+/g, '');
+          // If both comma and dot exist: assume comma is thousands separator
+          if (s.includes('.') && s.includes(',')) {
+            s = s.replace(/,/g, '');
+          } else if (!s.includes('.') && s.includes(',')) {
+            // If only comma exists: assume comma is decimal separator (e.g. 40,00)
+            const last = s.lastIndexOf(',');
+            s = s.slice(0, last).replace(/,/g, '') + '.' + s.slice(last + 1);
+          }
+          // Keep digits, sign and dot only
+          s = s.replace(/[^0-9+\-\.]/g, '');
+          if (!s || s === '.' || s === '+' || s === '-') return null;
+          const n = Number(s);
+          return Number.isFinite(n) ? n : null;
+        };
+
+        const extractFromValue = (val) => {
+          try {
+            if (!val) return null;
+            if (val.type === 'number') return val.number ?? null;
+            if (val.type === 'formula') {
+              if (val.formula?.type === 'number') return val.formula?.number ?? null;
+              if (val.formula?.type === 'string') return parseNumberFromText(val.formula?.string);
+              return null;
+            }
+            if (val.type === 'rich_text') {
+              const t = (val.rich_text || []).map((x) => x?.plain_text || '').join('');
+              return parseNumberFromText(t);
+            }
+            if (val.type === 'title') {
+              const t = (val.title || []).map((x) => x?.plain_text || '').join('');
+              return parseNumberFromText(t);
+            }
+            if (val.type === 'select') return parseNumberFromText(val.select?.name);
+            if (val.type === 'status') return parseNumberFromText(val.status?.name);
+            return null;
+          } catch {
+            return null;
+          }
+        };
+
+        if (prop.type === 'number') return prop.number ?? null;
+        if (prop.type === 'formula') {
+          if (prop.formula?.type === 'number') return prop.formula?.number ?? null;
+          if (prop.formula?.type === 'string') return parseNumberFromText(prop.formula?.string);
+          return null;
+        }
+        if (prop.type === 'rich_text') {
+          const t = (prop.rich_text || []).map((x) => x?.plain_text || '').join('');
+          return parseNumberFromText(t);
+        }
+        if (prop.type === 'title') {
+          const t = (prop.title || []).map((x) => x?.plain_text || '').join('');
+          return parseNumberFromText(t);
+        }
+        if (prop.type === 'rollup') {
+          const r = prop.rollup;
+          if (!r) return null;
+          if (r.type === 'number') return r.number ?? null;
+          if (r.type === 'array') {
+            // Some rollups return an array. Try:
+            // - sum numbers
+            // - parse numbers from text
+            const arr = Array.isArray(r.array) ? r.array : [];
+            const nums = arr
+              .map((x) => extractFromValue(x))
+              .filter((n) => typeof n === 'number' && Number.isFinite(n));
+            if (nums.length === 0) return null;
+            return nums.reduce((a, b) => a + b, 0);
+          }
+          return null;
+        }
+        return null;
+      } catch {
+        return null;
+      }
+    };
+
+    const extractUniqueIdText = (prop) => {
+      try {
+        if (!prop) return null;
+
+        // Notion "ID" property type
+        if (prop.type === 'unique_id') {
+          const u = prop.unique_id;
+          if (!u) return null;
+          const prefix = u.prefix ? String(u.prefix).trim() : '';
+          const num = typeof u.number === 'number' ? u.number : null;
+          if (num === null) return null;
+          return prefix ? `${prefix}-${num}` : String(num);
+        }
+
+        // If it's stored as something else, try best-effort fallbacks
+        if (prop.type === 'number' && typeof prop.number === 'number') {
+          return String(prop.number);
+        }
+        if (prop.type === 'formula') {
+          if (prop.formula?.type === 'string') return String(prop.formula.string || '').trim() || null;
+          if (prop.formula?.type === 'number' && typeof prop.formula.number === 'number') return String(prop.formula.number);
+        }
+        if (prop.type === 'rich_text') {
+          const t = (prop.rich_text || []).map((x) => x?.plain_text || '').join('').trim();
+          return t || null;
+        }
+        if (prop.type === 'title') {
+          const t = (prop.title || []).map((x) => x?.plain_text || '').join('').trim();
+          return t || null;
+        }
+        if (prop.type === 'rollup') {
+          const r = prop.rollup;
+          if (!r) return null;
+          if (r.type === 'number' && typeof r.number === 'number') return String(r.number);
+          if (r.type === 'array') {
+            const arr = Array.isArray(r.array) ? r.array : [];
+            // return first non-empty text-like value
+            for (const v of arr) {
+              if (!v) continue;
+              if (v.type === 'unique_id') {
+                const x = extractUniqueIdText(v);
+                if (x) return x;
+              }
+              if (v.type === 'rich_text') {
+                const t = (v.rich_text || []).map((x) => x?.plain_text || '').join('').trim();
+                if (t) return t;
+              }
+              if (v.type === 'title') {
+                const t = (v.title || []).map((x) => x?.plain_text || '').join('').trim();
+                if (t) return t;
+              }
+              if (v.type === 'number' && typeof v.number === 'number') return String(v.number);
+            }
+          }
+        }
+
+        return null;
+      } catch {
+        return null;
+      }
+    };
+
+    // Optional mapping:
+    // Some workspaces keep the human-readable Product "ID" (Notion unique_id)
+    // inside the Products_list database (ordersDatabaseId), not inside
+    // Products_Database itself.
+    //
+    // We build a map: { productPageId -> products_list.ID }
+    // by scanning Products_list pages and reading:
+    // - relation property: "Product" -> page id in Products_Database
+    // - unique id property: "ID" -> e.g. ORD-86
+    const productIdToProductsListId = new Map();
+    if (ordersDatabaseId) {
+      try {
+        let hasMoreList = true;
+        let startCursorList = undefined;
+
+        while (hasMoreList) {
+          let respList;
+          try {
+            // Fast path: only records that have Product relation
+            respList = await notion.databases.query({
+              database_id: ordersDatabaseId,
+              start_cursor: startCursorList,
+              page_size: 100,
+              filter: {
+                property: 'Product',
+                relation: { is_not_empty: true },
+              },
+              sorts: [{ timestamp: 'created_time', direction: 'descending' }],
+            });
+          } catch (e) {
+            // If the filter fails (e.g. property name differs), retry without it
+            respList = await notion.databases.query({
+              database_id: ordersDatabaseId,
+              start_cursor: startCursorList,
+              page_size: 100,
+              sorts: [{ timestamp: 'created_time', direction: 'descending' }],
+            });
+          }
+
+          for (const pg of respList.results || []) {
+            const props = pg.properties || {};
+            const prodRelProp = getPropInsensitive(props, 'Product');
+            const rel = prodRelProp?.relation;
+            if (!Array.isArray(rel) || rel.length === 0) continue;
+            const prodId = rel[0]?.id;
+            if (!prodId) continue;
+
+            const idProp = getPropInsensitive(props, 'ID');
+            const idText = extractUniqueIdText(idProp);
+            if (!idText) continue;
+
+            // Keep first encountered (we query newest first)
+            if (!productIdToProductsListId.has(prodId)) {
+              productIdToProductsListId.set(prodId, idText);
+            }
+          }
+
+          hasMoreList = !!respList.has_more;
+          startCursorList = respList.next_cursor;
+
+          // Safety valve for very large DBs
+          if (productIdToProductsListId.size > 5000) break;
+        }
+      } catch (e) {
+        console.warn(
+          '[api/components] Could not build Products_list ID map:',
+          e?.body || e?.message || e,
+        );
+      }
+    }
     try {
       while (hasMore) {
         const response = await notion.databases.query({
@@ -1893,11 +2203,38 @@ app.get(
           .map((page) => {
             const titleProperty = page.properties?.Name;
             const urlProperty = page.properties?.URL;
+            // Price: "Unity Price" (Number) in Products_Database
+            const unitPriceProp =
+              getPropInsensitive(page.properties, 'Unity Price') ||
+              getPropInsensitive(page.properties, 'Unit price');
+            const unitPrice = extractNumber(unitPriceProp);
+
+            // Display ID inside the product icon.
+            // Priority:
+            // 1) Products_list "ID" (if a mapping exists for this product)
+            // 2) Products_Database "ID" (fallback)
+            const displayIdFromProductsList =
+              productIdToProductsListId.get(page.id) || null;
+            const displayIdProp = getPropInsensitive(page.properties, 'ID');
+            const displayIdFromProductsDb = extractUniqueIdText(displayIdProp);
+            const displayId = displayIdFromProductsList || displayIdFromProductsDb;
+
+            // Optional image (if exists in DB). We support several common property names.
+            const imageProp =
+              getPropInsensitive(page.properties, 'Image') ||
+              getPropInsensitive(page.properties, 'Photo') ||
+              getPropInsensitive(page.properties, 'Picture') ||
+              getPropInsensitive(page.properties, 'Thumbnail') ||
+              getPropInsensitive(page.properties, 'Icon');
+            const imageUrl = extractFirstFileUrl(imageProp);
             if (titleProperty?.title?.length > 0) {
               return {
                 id: page.id,
                 name: titleProperty.title[0].plain_text,
                 url: urlProperty ? urlProperty.url : null,
+                unitPrice: typeof unitPrice === 'number' && Number.isFinite(unitPrice) ? unitPrice : null,
+                displayId: displayId || null,
+                imageUrl: imageUrl || null,
               };
             }
             return null;
@@ -2001,6 +2338,15 @@ app.post(
         .status(500)
         .json({ success: false, message: "Database IDs are not configured." });
     }
+      // Password confirmation (requested): user must enter their password
+      // again before submitting an order.
+      const password = String(req.body?.password || "").trim();
+      if (!password) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Password is required before checkout." });
+      }
+
 let { products } = req.body || {};
 if (!Array.isArray(products) || products.length === 0) {
   const d = req.session.orderDraft;
@@ -2036,7 +2382,15 @@ if (cleanedProducts.some(p => !p.reason)) {
       if (userQuery.results.length === 0) {
         return res.status(404).json({ error: "User not found." });
       }
-      const userId = userQuery.results[0].id;
+      const userPage = userQuery.results[0];
+      const userId = userPage.id;
+
+      const storedPassword = userPage?.properties?.Password?.number;
+      if (!storedPassword || String(storedPassword) !== password) {
+        return res
+          .status(401)
+          .json({ success: false, message: "Invalid password. Please try again." });
+      }
 
       const creations = await Promise.all(
   cleanedProducts.map(async (product) => {
