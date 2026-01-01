@@ -14,6 +14,25 @@ document.addEventListener('DOMContentLoaded', () => {
   let allOrders = [];
   let filtered = [];
 
+  // Map of rendered groups by their representative groupId
+  let groupsById = new Map();
+
+  // Modal (Order details)
+  const modalOverlay = document.getElementById('coOrderModal');
+  const modalCloseBtn = document.getElementById('coModalClose');
+  const modalEls = {
+    statusTitle: document.getElementById('coModalStatusTitle'),
+    statusSub: document.getElementById('coModalStatusSub'),
+    reason: document.getElementById('coModalReason'),
+    date: document.getElementById('coModalDate'),
+    components: document.getElementById('coModalComponents'),
+    totalQty: document.getElementById('coModalTotalQty'),
+    totalPrice: document.getElementById('coModalTotalPrice'),
+    items: document.getElementById('coModalItems'),
+  };
+
+  let lastFocusEl = null;
+
   const norm = (s) => String(s || '').toLowerCase().trim();
   const toDate = (d) => new Date(d || 0);
 
@@ -68,19 +87,128 @@ document.addEventListener('DOMContentLoaded', () => {
     return (list || []).slice().sort((a, b) => toDate(b.createdTime) - toDate(a.createdTime));
   }
 
+  // ===== Order status flow (as requested) =====
+  const STATUS_FLOW = [
+    { label: 'Order Placed', sub: 'Your order has been placed.' },
+    { label: 'Under Supervision', sub: 'Your order is under supervision.' },
+    { label: 'In progress', sub: 'We are preparing your order.' },
+    { label: 'Shipped', sub: 'Your cargo is on delivery.' },
+    { label: 'Arrived', sub: 'Your order has arrived.' },
+  ];
+
+  function statusToIndex(status) {
+    const s = norm(status).replace(/[_-]+/g, ' ');
+
+    // Most advanced statuses first
+    if (/(arrived|delivered|received)/.test(s)) return 5;
+    if (/(shipped|on the way|delivering|prepared)/.test(s)) return 4;
+    if (/(in progress|inprogress|progress)/.test(s)) return 3;
+    if (/(under supervision|supervision|review)/.test(s)) return 2;
+    if (/(order placed|placed|pending|order received)/.test(s)) return 1;
+    return 1;
+  }
+
   function computeStage(items) {
-    const statuses = (items || []).map((x) => norm(x.status));
-    const deliveredSet = new Set(['received', 'delivered']);
-    const onTheWaySet = new Set(['prepared', 'on the way', 'ontheway', 'on_the_way', 'shipped', 'delivering']);
+    const idx = Math.max(
+      1,
+      ...(items || []).map((x) => statusToIndex(x.status)),
+    );
+    const safe = Math.min(5, Math.max(1, idx));
+    const meta = STATUS_FLOW[safe - 1] || STATUS_FLOW[0];
+    return { idx: safe, label: meta.label, sub: meta.sub };
+  }
 
-    if (statuses.length > 0 && statuses.every((s) => deliveredSet.has(s))) {
-      return { step: 3, label: 'Delivered', pill: 'co-pill is-muted' };
+  function setProgress(idx) {
+    const safe = Math.min(5, Math.max(1, Number(idx) || 1));
+    for (let i = 1; i <= 5; i++) {
+      const stepEl = document.getElementById(`coStep${i}`);
+      if (!stepEl) continue;
+      stepEl.classList.toggle('is-active', i <= safe);
+      stepEl.classList.toggle('is-current', i === safe);
+    }
+    for (let i = 1; i <= 4; i++) {
+      const connEl = document.getElementById(`coConn${i}`);
+      if (!connEl) continue;
+      connEl.classList.toggle('is-active', i < safe);
+    }
+  }
+
+  function openOrderModal(group) {
+    if (!modalOverlay || !group) return;
+
+    const items = group.products || [];
+    const stage = computeStage(items);
+
+    // Populate header
+    if (modalEls.statusTitle) modalEls.statusTitle.textContent = stage.label;
+    if (modalEls.statusSub) modalEls.statusSub.textContent = stage.sub;
+
+    // Meta
+    const totalQty = items.reduce((sum, x) => sum + (Number(x.quantity) || 0), 0);
+    const estimateTotal = items.reduce(
+      (sum, x) => sum + (Number(x.quantity) || 0) * (Number(x.unitPrice) || 0),
+      0,
+    );
+
+    if (modalEls.reason) modalEls.reason.textContent = group.reason || '—';
+    if (modalEls.date) modalEls.date.textContent = fmtCreated(group.latestCreated) || '—';
+    if (modalEls.components) modalEls.components.textContent = String(items.length);
+    if (modalEls.totalQty) modalEls.totalQty.textContent = String(totalQty);
+    if (modalEls.totalPrice) modalEls.totalPrice.textContent = fmtMoney(estimateTotal);
+
+    // Items list
+    if (modalEls.items) {
+      modalEls.items.innerHTML = '';
+      if (!items.length) {
+        modalEls.items.innerHTML = '<div class="muted">No items.</div>';
+      } else {
+        const frag = document.createDocumentFragment();
+        for (const it of items) {
+          const qty = Number(it.quantity) || 0;
+          const unit = Number(it.unitPrice) || 0;
+          const lineTotal = qty * unit;
+
+          const row = document.createElement('div');
+          row.className = 'co-item';
+          row.innerHTML = `
+            <div class="co-item-left">
+              <div class="co-item-name">${escapeHTML(it.productName || 'Unknown Product')}</div>
+              <div class="co-item-sub">Qty: ${escapeHTML(String(qty))} · Unit: ${escapeHTML(fmtMoney(unit))}</div>
+            </div>
+            <div class="co-item-right">
+              <div class="co-item-total">${escapeHTML(fmtMoney(lineTotal))}</div>
+              <div class="co-item-status">${escapeHTML(it.status || '—')}</div>
+            </div>
+          `;
+          frag.appendChild(row);
+        }
+        modalEls.items.appendChild(frag);
+      }
     }
 
-    if (statuses.some((s) => onTheWaySet.has(s))) {
-      return { step: 2, label: 'On the way', pill: 'co-pill is-outline' };
+    // Progress
+    setProgress(stage.idx);
+
+    // Show
+    lastFocusEl = document.activeElement;
+    modalOverlay.classList.add('is-open');
+    modalOverlay.setAttribute('aria-hidden', 'false');
+    document.body.classList.add('co-modal-open');
+
+    // Ensure feather icons are rendered (in case the modal was injected later)
+    if (window.feather) window.feather.replace();
+
+    if (modalCloseBtn) modalCloseBtn.focus();
+  }
+
+  function closeOrderModal() {
+    if (!modalOverlay) return;
+    modalOverlay.classList.remove('is-open');
+    modalOverlay.setAttribute('aria-hidden', 'true');
+    document.body.classList.remove('co-modal-open');
+    if (lastFocusEl && typeof lastFocusEl.focus === 'function') {
+      lastFocusEl.focus();
     }
-    return { step: 1, label: 'Order Received', pill: 'co-pill' };
   }
 
   function buildGroups(list) {
@@ -179,11 +307,11 @@ document.addEventListener('DOMContentLoaded', () => {
       </div>
     `;
 
-    card.addEventListener('click', () => goToTracking(group.groupId));
+    card.addEventListener('click', () => openOrderModal(group));
     card.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
-        goToTracking(group.groupId);
+        openOrderModal(group);
       }
     });
 
@@ -194,6 +322,7 @@ document.addEventListener('DOMContentLoaded', () => {
     ordersListDiv.innerHTML = '';
 
     const groups = buildGroups(list);
+    groupsById = new Map((groups || []).map((g) => [g.groupId, g]));
     if (!groups || groups.length === 0) {
       ordersListDiv.innerHTML = '<p>No orders found.</p>';
       return;
@@ -271,4 +400,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
   fetchAndDisplayOrders();
   setupSearch();
+
+  // Modal wiring
+  if (modalCloseBtn) modalCloseBtn.addEventListener('click', closeOrderModal);
+  if (modalOverlay) {
+    modalOverlay.addEventListener('click', (e) => {
+      if (e.target === modalOverlay) closeOrderModal();
+    });
+  }
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && modalOverlay?.classList.contains('is-open')) {
+      e.preventDefault();
+      closeOrderModal();
+    }
+  });
 });
