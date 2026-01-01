@@ -138,24 +138,15 @@
 </div>
 </header>
 <main class="container-full-width">
-<!-- NOTE: We intentionally removed the generic `.card` wrapper here so the
-     order cards can match the reference UI (cards directly on the background). -->
-<section id="current-orders" class="current-orders-shell">
-<div id="orders-list">
+<section class="card" id="current-orders">
+<div class="co-cards" id="orders-list">
 <p><i class="loading-icon" data-feather="loader"></i> Loading orders...</p>
 </div>
 </section>
 </main>
 </div>
 </div>
-<div aria-hidden="true" class="modal" id="orderModal">
-<div aria-labelledby="orderModalTitle" aria-modal="true" class="modal-content" role="dialog">
-<button aria-label="Close" class="close-btn" id="orderModalClose">
-<i data-feather="x"></i>
-</button>
-<div id="orderModalBody"></div>
-</div>
-</div>
+<!-- Order modal removed (cards now navigate to Tracking page) -->
 <script src="https://cdn.jsdelivr.net/npm/choices.js/public/assets/scripts/choices.min.js"></script>
 <script>feather.replace();</script>
 <script src="/js/common-ui.js"></script>
