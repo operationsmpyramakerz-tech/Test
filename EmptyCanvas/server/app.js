@@ -2400,7 +2400,7 @@ if (cleanedProducts.some(p => !p.reason)) {
               Reason: { title: [{ text: { content: product.reason } }] },
               "Quantity Requested": { number: Number(product.quantity) },
               Product: { relation: [{ id: product.id }] },
-              "Status": { select: { name: "Pending" } },
+              "Status": { select: { name: "Order Placed" } },
               "Teams Members": { relation: [{ id: userId }] },
             },
           });
@@ -2431,7 +2431,7 @@ if (cleanedProducts.some(p => !p.reason)) {
   reason: c.reason,
   productName: c.productName,
   quantity: c.quantity,
-  status: "Pending",
+  status: "Order Placed",
   createdTime: c.createdTime,
 }));
       req.session.recentOrders = (req.session.recentOrders || []).concat(
