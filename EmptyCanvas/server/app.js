@@ -57,6 +57,7 @@ app.use((req, res, next) => {
 // Helpers: Allowed pages control
 const ALL_PAGES = [
   "Current Orders",
+   "Your Orders",
   "Requested Orders",
   "Assigned Schools Requested Orders",
   "Create New Order",
@@ -77,23 +78,34 @@ const normKey = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/gi, "");
 function normalizePages(names = []) {
   const set = new Set(names.map((n) => String(n || "").trim().toLowerCase()));
   const out = [];
-  if (set.has("current orders")) out.push("Current Orders");
+
+  // "Current Orders" users should also be able to access the user-friendly
+  // orders list page "Your Orders" without adding a new permission option.
+  if (set.has("current orders")) {
+    out.push("Current Orders");
+    out.push("Your Orders");
+  }
+  if (set.has("your orders")) out.push("Your Orders");
+
   if (set.has("requested orders") || set.has("schools requested orders")) {
     out.push("Requested Orders");
   }
+
   if (
     set.has("assigned schools requested orders") ||
     set.has("assigned requested orders") ||
     set.has("assigned orders") ||
     set.has("my assigned orders") ||
-    set.has("storage") // alias: Storage
+    set.has("storage")
   ) {
     out.push("Assigned Schools Requested Orders");
   }
+
   if (set.has("create new order")) out.push("Create New Order");
   if (set.has("stocktaking")) out.push("Stocktaking");
   if (set.has("funds")) out.push("Funds");
   if (set.has("expenses")) out.push("Expenses");
+
   if (
     set.has("expenses users") ||
     set.has("expenses by user") ||
@@ -101,10 +113,11 @@ function normalizePages(names = []) {
   ) {
     out.push("Expenses Users");
   }
-  if (set.has("logistics")) out.push("Logistics");  if (set.has("s.v schools orders") || set.has("sv schools orders")) out.push("S.V schools orders");
+
+  if (set.has("logistics")) out.push("Logistics");
+  if (set.has("s.v schools orders") || set.has("sv schools orders")) out.push("S.V schools orders");
   if (set.has("damaged assets")) out.push("Damaged Assets");
-  if (set.has("s.v schools assets") || set.has("sv schools assets")) 
-  out.push("S.V Schools Assets");
+  if (set.has("s.v schools assets") || set.has("sv schools assets")) out.push("S.V Schools Assets");
 
   return out;
 }
@@ -165,6 +178,7 @@ function extractAllowedPages(props = {}) {
 
 function firstAllowedPath(allowed = []) {
   if (allowed.includes("Current Orders")) return "/orders";
+  if (allowed.includes("Your Orders")) return "/orders/your";
   if (allowed.includes("Requested Orders")) return "/orders/requested";
   if (allowed.includes("Assigned Schools Requested Orders")) return "/orders/assigned";
   if (allowed.includes("Create New Order")) return "/orders/new";
