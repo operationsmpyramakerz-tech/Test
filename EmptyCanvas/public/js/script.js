@@ -87,6 +87,46 @@ document.addEventListener('DOMContentLoaded', () => {
     return (list || []).slice().sort((a, b) => toDate(b.createdTime) - toDate(a.createdTime));
   }
 
+  // Build a display string for a group based on Notion "ID" (unique_id)
+  // Examples:
+  // - Single item: "ORD-95"
+  // - Multiple items: "ORD-95 : ORD-98"
+  function computeOrderIdRange(items) {
+    const arr = Array.isArray(items) ? items : [];
+    const withId = arr.filter((x) => x && x.orderId);
+    if (withId.length === 0) return null;
+
+    // Prefer numeric range if available and consistent
+    const withNum = withId.filter(
+      (x) => typeof x.orderIdNumber === 'number' && Number.isFinite(x.orderIdNumber)
+    );
+
+    const allHaveNum = withNum.length === withId.length;
+    const prefixes = new Set(withNum.map((x) => String(x.orderIdPrefix || '').trim()));
+    const samePrefix = allHaveNum && prefixes.size <= 1;
+
+    if (samePrefix) {
+      const prefix = (withNum[0]?.orderIdPrefix ? String(withNum[0].orderIdPrefix).trim() : '');
+      const nums = withNum.map((x) => Number(x.orderIdNumber)).filter((n) => Number.isFinite(n));
+      if (nums.length) {
+        const min = Math.min(...nums);
+        const max = Math.max(...nums);
+        const from = prefix ? `${prefix}-${min}` : String(min);
+        const to = prefix ? `${prefix}-${max}` : String(max);
+        return from === to ? from : `${from} : ${to}`;
+      }
+    }
+
+    // Fallback: earliest -> latest by createdTime
+    const sorted = withId
+      .slice()
+      .sort((a, b) => toDate(a.createdTime) - toDate(b.createdTime));
+    const from = sorted[0]?.orderId;
+    const to = sorted[sorted.length - 1]?.orderId;
+    if (!from) return null;
+    return from === to ? from : `${from} : ${to}`;
+  }
+
   // ===== Order status flow (as requested) =====
   const STATUS_FLOW = [
     { label: 'Order Placed', sub: 'Your order has been placed.' },
@@ -260,6 +300,7 @@ document.addEventListener('DOMContentLoaded', () => {
           products: [],
           reason: '—',
           reasons: [],
+          orderIdRange: null,
         };
         map.set(key, g);
       }
@@ -279,6 +320,9 @@ document.addEventListener('DOMContentLoaded', () => {
       const summary = summarizeReasons(g.products);
       g.reason = summary.title;
       g.reasons = summary.uniqueReasons;
+
+      // Card title should show the Notion "ID" range instead of Reason
+      g.orderIdRange = computeOrderIdRange(g.products);
     }
 
     return Array.from(map.values()).sort((a, b) => toDate(b.latestCreated) - toDate(a.latestCreated));
@@ -307,7 +351,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const created = fmtDateOnly(group.latestCreated);
     const stage = computeStage(items);
 
-    const title = escapeHTML(group.reason);
+    const title = escapeHTML(group.orderIdRange || group.reason);
 
     // Under the title we show the date (per requested mapping)
     const sub = created ? escapeHTML(created) : '—';
@@ -315,9 +359,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // Card price shows components total price (per requested mapping)
     const componentsPrice = fmtMoney(estimateTotal);
 
+    const thumbLabel = String(group.orderIdRange || group.reason || '?').trim();
     const thumbHTML = first.productImage
-      ? `<img src="${escapeHTML(first.productImage)}" alt="${escapeHTML(first.productName || group.reason)}" loading="lazy" />`
-      : `<div class="co-thumb__ph">${escapeHTML(String(group.reason || '?').trim().slice(0, 2).toUpperCase())}</div>`;
+      ? `<img src="${escapeHTML(first.productImage)}" alt="${escapeHTML(first.productName || thumbLabel)}" loading="lazy" />`
+      : `<div class="co-thumb__ph">${escapeHTML(thumbLabel.slice(0, 2).toUpperCase())}</div>`;
 
     const card = document.createElement('article');
     card.className = 'co-card';
@@ -430,7 +475,11 @@ document.addEventListener('DOMContentLoaded', () => {
       const q = norm(searchInput.value);
       const base = allOrders;
       filtered = q
-        ? base.filter((o) => norm(o.reason).includes(q) || norm(o.productName).includes(q))
+        ? base.filter((o) =>
+            norm(o.reason).includes(q) ||
+            norm(o.productName).includes(q) ||
+            norm(o.orderId).includes(q)
+          )
         : base.slice();
       displayOrders(filtered);
     }
