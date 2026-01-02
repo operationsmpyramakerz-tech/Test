@@ -11,12 +11,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const CACHE_KEY = 'ordersDataV3';
   const CACHE_TTL_MS = 30 * 1000;
 
-  // Flat list of order rows (each Notion page = one component line)
-  let allItems = [];
-
-  // Time-grouped orders (each group = one checkout / submission batch)
-  let allGroups = [];
-  let filteredGroups = [];
+  let allOrders = [];
+  let filtered = [];
 
   // Map of rendered groups by their representative groupId
   let groupsById = new Map();
@@ -89,95 +85,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function sortByNewest(list) {
     return (list || []).slice().sort((a, b) => toDate(b.createdTime) - toDate(a.createdTime));
-  }
-
-  // ===== Grouping logic =====
-  // Notion creates one page per component. When a user checks out,
-  // multiple pages are created around the same time. We group these
-  // together as one "order".
-  const GROUP_WINDOW_MS = 2 * 60 * 1000; // 2 minutes window
-
-  function summarizeReasons(items) {
-    const counts = new Map();
-    for (const it of items || []) {
-      const r = String(it.reason || '').trim();
-      if (!r) continue;
-      counts.set(r, (counts.get(r) || 0) + 1);
-    }
-
-    const entries = Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
-    const unique = entries.map(([k]) => k);
-
-    if (unique.length === 0) return { title: 'No Reason', uniqueReasons: [] };
-    if (unique.length === 1) return { title: unique[0], uniqueReasons: unique };
-
-    const main = unique[0];
-    return { title: `${main} +${unique.length - 1}`, uniqueReasons: unique };
-  }
-
-  function buildGroups(items) {
-    const sorted = sortByNewest(items);
-    const groups = [];
-
-    let current = null;
-    let currentAnchorMs = null; // newest time in current group
-
-    for (const o of sorted) {
-      const t = toDate(o.createdTime).getTime();
-
-      if (!current) {
-        current = {
-          groupId: o.id, // representative id (newest item in group)
-          latestCreated: o.createdTime,
-          earliestCreated: o.createdTime,
-          products: [],
-          reason: '—',
-          reasons: [],
-        };
-        currentAnchorMs = t;
-      }
-
-      const withinWindow = Math.abs(currentAnchorMs - t) <= GROUP_WINDOW_MS;
-
-      // If the next item is far away in time, start a new group.
-      if (!withinWindow) {
-        // Finalize current group meta
-        const summary = summarizeReasons(current.products);
-        current.reason = summary.title;
-        current.reasons = summary.uniqueReasons;
-        groups.push(current);
-
-        current = {
-          groupId: o.id,
-          latestCreated: o.createdTime,
-          earliestCreated: o.createdTime,
-          products: [],
-          reason: '—',
-          reasons: [],
-        };
-        currentAnchorMs = t;
-      }
-
-      current.products.push(o);
-
-      if (!current.latestCreated || toDate(o.createdTime) > toDate(current.latestCreated)) {
-        current.latestCreated = o.createdTime;
-        current.groupId = o.id;
-        currentAnchorMs = toDate(current.latestCreated).getTime();
-      }
-      if (!current.earliestCreated || toDate(o.createdTime) < toDate(current.earliestCreated)) {
-        current.earliestCreated = o.createdTime;
-      }
-    }
-
-    if (current) {
-      const summary = summarizeReasons(current.products);
-      current.reason = summary.title;
-      current.reasons = summary.uniqueReasons;
-      groups.push(current);
-    }
-
-    return groups.sort((a, b) => toDate(b.latestCreated) - toDate(a.latestCreated));
   }
 
   // ===== Order status flow (as requested) =====
@@ -263,11 +170,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
           const row = document.createElement('div');
           row.className = 'co-item';
-          const itemReason = String(it.reason || '').trim();
           row.innerHTML = `
             <div class="co-item-left">
               <div class="co-item-name">${escapeHTML(it.productName || 'Unknown Product')}</div>
-              <div class="co-item-sub">Reason: ${escapeHTML(itemReason || '—')} · Qty: ${escapeHTML(String(qty))} · Unit: ${escapeHTML(fmtMoney(unit))}</div>
+              <div class="co-item-sub">Reason: ${escapeHTML(it.reason || '—')} · Qty: ${escapeHTML(String(qty))} · Unit: ${escapeHTML(fmtMoney(unit))}</div>
             </div>
             <div class="co-item-right">
               <div class="co-item-total">${escapeHTML(fmtMoney(lineTotal))}</div>
@@ -305,12 +211,84 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // (optional) You can still navigate to the tracking page using groupId if needed.
-  // function goToTracking(groupId) {
-  //   if (!groupId) return;
-  //   const url = `/orders/tracking?groupId=${encodeURIComponent(groupId)}`;
-  //   window.location.href = url;
-  // }
+    function buildGroups(list) {
+    const sorted = sortByNewest(list);
+
+    // Group by "date + time" to the minute (so orders that differ by 1 minute won't be merged).
+    const pad2 = (n) => String(n).padStart(2, '0');
+    const timeKey = (createdTime) => {
+      const d = toDate(createdTime);
+      if (Number.isNaN(d.getTime())) return 'Unknown time';
+      const yyyy = d.getFullYear();
+      const mm = pad2(d.getMonth() + 1);
+      const dd = pad2(d.getDate());
+      const hh = pad2(d.getHours());
+      const mi = pad2(d.getMinutes());
+      return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
+    };
+
+    const summarizeReasons = (items) => {
+      const counts = new Map();
+      for (const it of items || []) {
+        const r = String(it.reason || '').trim();
+        if (!r) continue;
+        counts.set(r, (counts.get(r) || 0) + 1);
+      }
+
+      const entries = Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
+      const unique = entries.map(([k]) => k);
+
+      if (unique.length === 0) return { title: 'No Reason', uniqueReasons: [] };
+      if (unique.length === 1) return { title: unique[0], uniqueReasons: unique };
+
+      const main = unique[0];
+      return { title: `${main} +${unique.length - 1}`, uniqueReasons: unique };
+    };
+
+    const map = new Map();
+
+    for (const o of sorted) {
+      const key = timeKey(o.createdTime);
+      let g = map.get(key);
+
+      if (!g) {
+        g = {
+          timeKey: key,
+          groupId: o.id, // representative id (newest item in group)
+          latestCreated: o.createdTime,
+          earliestCreated: o.createdTime,
+          products: [],
+          reason: '—',
+          reasons: [],
+        };
+        map.set(key, g);
+      }
+
+      g.products.push(o);
+
+      if (!g.latestCreated || toDate(o.createdTime) > toDate(g.latestCreated)) {
+        g.latestCreated = o.createdTime;
+        g.groupId = o.id;
+      }
+      if (!g.earliestCreated || toDate(o.createdTime) < toDate(g.earliestCreated)) {
+        g.earliestCreated = o.createdTime;
+      }
+    }
+
+    for (const g of map.values()) {
+      const summary = summarizeReasons(g.products);
+      g.reason = summary.title;
+      g.reasons = summary.uniqueReasons;
+    }
+
+    return Array.from(map.values()).sort((a, b) => toDate(b.latestCreated) - toDate(a.latestCreated));
+  }
+
+  function goToTracking(groupId) {
+    if (!groupId) return;
+    const url = `/orders/tracking?groupId=${encodeURIComponent(groupId)}`;
+    window.location.href = url;
+  }
 
   function renderCard(group) {
     const items = group.products || [];
@@ -386,9 +364,10 @@ document.addEventListener('DOMContentLoaded', () => {
     return card;
   }
 
-  function displayGroups(groups) {
+  function displayOrders(list) {
     ordersListDiv.innerHTML = '';
 
+    const groups = buildGroups(list);
     groupsById = new Map((groups || []).map((g) => [g.groupId, g]));
     if (!groups || groups.length === 0) {
       ordersListDiv.innerHTML = '<p>No orders found.</p>';
@@ -411,10 +390,9 @@ document.addEventListener('DOMContentLoaded', () => {
       if (cached) {
         const parsed = JSON.parse(cached);
         if (parsed && Array.isArray(parsed.data) && (Date.now() - (parsed.ts || 0) < CACHE_TTL_MS)) {
-          allItems = sortByNewest(parsed.data);
-          allGroups = buildGroups(allItems);
-          filteredGroups = allGroups.slice();
-          displayGroups(filteredGroups);
+          allOrders = sortByNewest(parsed.data);
+          filtered = allOrders.slice();
+          displayOrders(filtered);
           return;
         }
         sessionStorage.removeItem(CACHE_KEY);
@@ -435,11 +413,10 @@ document.addEventListener('DOMContentLoaded', () => {
       }
 
       const data = await response.json();
-      allItems = sortByNewest(Array.isArray(data) ? data : []);
-      allGroups = buildGroups(allItems);
-      filteredGroups = allGroups.slice();
-      sessionStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), data: allItems }));
-      displayGroups(filteredGroups);
+      allOrders = sortByNewest(Array.isArray(data) ? data : []);
+      filtered = allOrders.slice();
+      sessionStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), data: allOrders }));
+      displayOrders(filtered);
     } catch (error) {
       console.error('Error fetching orders:', error);
       ordersListDiv.innerHTML = `<p style="color: red;">Error: ${escapeHTML(error.message)}</p>`;
@@ -449,20 +426,13 @@ document.addEventListener('DOMContentLoaded', () => {
   function setupSearch() {
     if (!searchInput) return;
 
-    function groupMatchesQuery(g, q) {
-      if (!q) return true;
-      if (norm(g.reason).includes(q)) return true;
-      const items = g.products || [];
-      return items.some((it) => norm(it.reason).includes(q) || norm(it.productName).includes(q));
-    }
-
     function runFilter() {
       const q = norm(searchInput.value);
-      const base = allGroups;
-      filteredGroups = q
-        ? base.filter((g) => groupMatchesQuery(g, q))
+      const base = allOrders;
+      filtered = q
+        ? base.filter((o) => norm(o.reason).includes(q) || norm(o.productName).includes(q))
         : base.slice();
-      displayGroups(filteredGroups);
+      displayOrders(filtered);
     }
 
     searchInput.addEventListener('input', runFilter);
