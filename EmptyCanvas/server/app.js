@@ -740,6 +740,79 @@ app.get(
       let hasMore = true;
       let startCursor = undefined;
 
+      // ----- Notion "ID" (unique_id) helpers -----
+      // We support different property names by:
+      // 1) trying a property named "ID" (case-insensitive)
+      // 2) falling back to the first property of type "unique_id"
+      const getPropInsensitive = (props, name) => {
+        if (!props || !name) return null;
+        const target = String(name).trim().toLowerCase();
+        for (const [k, v] of Object.entries(props)) {
+          if (String(k).trim().toLowerCase() === target) return v;
+        }
+        return null;
+      };
+
+      const extractUniqueIdDetails = (prop) => {
+        try {
+          if (!prop) return { text: null, prefix: null, number: null };
+
+          // Native Notion "ID" property
+          if (prop.type === 'unique_id') {
+            const u = prop.unique_id;
+            if (!u || typeof u.number !== 'number') {
+              return { text: null, prefix: null, number: null };
+            }
+            const prefix = u.prefix ? String(u.prefix).trim() : '';
+            const number = u.number;
+            const text = prefix ? `${prefix}-${number}` : String(number);
+            return { text, prefix: prefix || null, number };
+          }
+
+          // Best-effort fallback (if "ID" is stored in another type)
+          let text = null;
+          if (prop.type === 'number' && typeof prop.number === 'number') text = String(prop.number);
+          if (prop.type === 'formula') {
+            if (prop.formula?.type === 'string') text = String(prop.formula.string || '').trim() || null;
+            if (prop.formula?.type === 'number' && typeof prop.formula.number === 'number') text = String(prop.formula.number);
+          }
+          if (prop.type === 'rich_text') {
+            text = (prop.rich_text || []).map((x) => x?.plain_text || '').join('').trim() || null;
+          }
+          if (prop.type === 'title') {
+            text = (prop.title || []).map((x) => x?.plain_text || '').join('').trim() || null;
+          }
+          if (!text) return { text: null, prefix: null, number: null };
+
+          // Try to parse prefix/number from a string like "ORD-95"
+          const m = String(text).trim().match(/^(.*?)(\d+)\s*$/);
+          const prefix = m ? String(m[1] || '').replace(/[-\s]+$/, '').trim() : '';
+          const number = m ? Number(m[2]) : null;
+          return {
+            text: String(text).trim(),
+            prefix: prefix || null,
+            number: Number.isFinite(number) ? number : null,
+          };
+        } catch {
+          return { text: null, prefix: null, number: null };
+        }
+      };
+
+      const getOrderUniqueIdDetails = (props) => {
+        const direct = getPropInsensitive(props, 'ID');
+        const d = extractUniqueIdDetails(direct);
+        if (d.text) return d;
+
+        // fallback: first unique_id property in the page
+        for (const v of Object.values(props || {})) {
+          if (v?.type === 'unique_id') {
+            const x = extractUniqueIdDetails(v);
+            if (x.text) return x;
+          }
+        }
+        return { text: null, prefix: null, number: null };
+      };
+
       while (hasMore) {
         const response = await notion.databases.query({
           database_id: ordersDatabaseId,
@@ -829,8 +902,14 @@ app.get(
             }
           }
 
-allOrders.push({
+          const uid = getOrderUniqueIdDetails(page.properties || {});
+
+          allOrders.push({
             id: page.id,
+            // Human-readable order identifier from Notion "ID" (unique_id)
+            orderId: uid.text,
+            orderIdPrefix: uid.prefix,
+            orderIdNumber: uid.number,
             reason:
               page.properties?.Reason?.title?.[0]?.plain_text || "No Reason",
             productName,
