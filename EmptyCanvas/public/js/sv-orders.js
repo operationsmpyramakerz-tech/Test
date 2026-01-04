@@ -140,6 +140,52 @@
     return `<span class="badge badge--notstarted">Not Started</span>`;
   }
 
+  // ===== Tracking progress (same flow as Current Orders) =====
+  const STATUS_FLOW = [
+    { label: "Order Placed", sub: "Your order has been placed." },
+    { label: "Under Supervision", sub: "Your order is under supervision." },
+    { label: "In progress", sub: "We are preparing your order." },
+    { label: "Shipped", sub: "Your cargo is on delivery." },
+    { label: "Arrived", sub: "Your order has arrived." },
+  ];
+
+  function statusToIndex(status) {
+    const s = norm(status).replace(/[_-]+/g, " ");
+    if (/(arrived|delivered|received)/.test(s)) return 5;
+    if (/(shipped|on the way|delivering|prepared)/.test(s)) return 4;
+    if (/(in progress|inprogress|progress)/.test(s)) return 3;
+    if (/(under supervision|supervision|review)/.test(s)) return 2;
+    if (/(order placed|placed|pending|order received)/.test(s)) return 1;
+    return 1;
+  }
+
+  function computeStage(items) {
+    const idx = Math.max(
+      1,
+      ...(items || []).map((x) => statusToIndex(x?.status)),
+    );
+    const safe = Math.min(5, Math.max(1, idx));
+    const meta = STATUS_FLOW[safe - 1] || STATUS_FLOW[0];
+    return { idx: safe, label: meta.label, sub: meta.sub };
+  }
+
+  function setSVProgress(idx) {
+    const safe = Math.min(5, Math.max(1, Number(idx) || 1));
+
+    for (let i = 1; i <= 5; i++) {
+      const stepEl = document.getElementById(`svStep${i}`);
+      if (!stepEl) continue;
+      stepEl.classList.toggle("is-active", i <= safe);
+      stepEl.classList.toggle("is-current", i === safe);
+    }
+
+    for (let i = 1; i <= 4; i++) {
+      const connEl = document.getElementById(`svConn${i}`);
+      if (!connEl) continue;
+      connEl.classList.toggle("is-active", i < safe);
+    }
+  }
+
   // ===== Grouping (same strategy as Current Orders) =====
   // Build a display string for a group based on Notion "ID" (unique_id)
   // Examples:
@@ -366,6 +412,10 @@
     const canAct = approvalKey(approval) === "not-started" && TAB === "not-started";
     if (modalEls.title) modalEls.title.textContent = approval;
     if (modalEls.sub) modalEls.sub.textContent = approvalSubtitle(approval);
+
+    // Tracking progress (operations status) — always show in all tabs
+    const stage = computeStage(group.products || []);
+    setSVProgress(stage.idx);
 
     if (modalEls.orderId) modalEls.orderId.textContent = group.orderIdRange || "—";
     if (modalEls.date) modalEls.date.textContent = fmtCreated(group.latestCreated) || "—";
