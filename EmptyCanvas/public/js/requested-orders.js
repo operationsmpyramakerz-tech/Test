@@ -27,6 +27,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const modalItems = document.getElementById("reqModalItems");
   const excelBtn = document.getElementById("reqExcelBtn");
   const receivedBtn = document.getElementById("reqReceivedBtn");
+  const receivedShippedBtn = document.getElementById("reqReceivedShippedBtn");
 
   const stepEls = [
     null,
@@ -428,9 +429,13 @@ document.addEventListener("DOMContentLoaded", () => {
     modalTotalPrice.textContent = fmtMoney(g.estimateTotal ?? 0);
 
     // Buttons visibility
-    // Only show "Received by operations" before Shipped
-    const canMarkReceived = stage.idx < 4;
-    if (receivedBtn) receivedBtn.style.display = canMarkReceived ? "inline-flex" : "none";
+    // - Before shipped: show "Received by operations" (sets Status => Shipped)
+    // - When shipped: show "Received" (sets Status => Arrived/Delivered)
+    const canMarkShipped = stage.idx < 4;
+    const canMarkArrived = stage.idx === 4;
+    if (receivedBtn) receivedBtn.style.display = canMarkShipped ? "inline-flex" : "none";
+    if (receivedShippedBtn)
+      receivedShippedBtn.style.display = canMarkArrived ? "inline-flex" : "none";
 
     // Items
     modalItems.innerHTML = "";
@@ -442,13 +447,13 @@ document.addEventListener("DOMContentLoaded", () => {
       const itemEl = document.createElement("div");
       itemEl.className = "co-item";
       itemEl.innerHTML = `
-        <div class="co-item__main">
-          <div class="co-item__name">${escapeHTML(it.productName || "Unknown")}</div>
-          <div class="co-item__sub">Reason: ${escapeHTML(it.reason || "-")} · Qty: ${qty} · Unit: ${fmtMoney(unit)}</div>
+        <div class="co-item-left">
+          <div class="co-item-name">${escapeHTML(it.productName || "Unknown")}</div>
+          <div class="co-item-sub">Reason: ${escapeHTML(it.reason || "-")} · Qty: ${qty} · Unit: ${fmtMoney(unit)}</div>
         </div>
-        <div class="co-item__right">
-          <div class="co-item__price">${fmtMoney(lineTotal)}</div>
-          <span class="co-item__pill">${escapeHTML(it.status || "-")}</span>
+        <div class="co-item-right">
+          <div class="co-item-total">${fmtMoney(lineTotal)}</div>
+          <div class="co-item-status">${escapeHTML(it.status || "-")}</div>
         </div>
       `;
       frag.appendChild(itemEl);
@@ -574,6 +579,60 @@ document.addEventListener("DOMContentLoaded", () => {
     } finally {
       receivedBtn.disabled = false;
       receivedBtn.textContent = prev;
+    }
+  }
+
+  // ---------------- Mark received (set status => Arrived/Delivered) ----------------
+  async function markReceivedAfterShipped(g) {
+    if (!g) return;
+    if (!receivedShippedBtn) return;
+    receivedShippedBtn.disabled = true;
+    const prev = receivedShippedBtn.textContent;
+    receivedShippedBtn.textContent = "Updating...";
+
+    try {
+      const res = await fetch("/api/orders/requested/mark-arrived", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ orderIds: g.items.map((x) => x.id) }),
+      });
+      if (res.status === 401) {
+        location.href = "/login";
+        return;
+      }
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.error) {
+        throw new Error(data.error || "Failed to update status");
+      }
+
+      const newStatus = data.status || "Arrived";
+      const idSet = new Set(g.items.map((x) => x.id));
+      allItems.forEach((it) => {
+        if (idSet.has(it.id)) it.status = newStatus;
+      });
+
+      // Move to Delivered tab
+      setActiveTab("delivered", { updateUrl: true });
+
+      const updated = groups.find((x) => x.key === g.key);
+      if (updated) openOrderModal(updated);
+
+      window.UI?.toast?.({
+        type: "success",
+        title: "Updated",
+        message: "Order marked as received.",
+      });
+    } catch (e) {
+      window.UI?.toast?.({
+        type: "error",
+        title: "Update failed",
+        message: e.message || "Could not update order.",
+      });
+      alert(e.message || "Could not update order.");
+    } finally {
+      receivedShippedBtn.disabled = false;
+      receivedShippedBtn.textContent = prev;
     }
   }
 
@@ -759,6 +818,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
   excelBtn?.addEventListener("click", () => downloadExcel(activeGroup));
   receivedBtn?.addEventListener("click", () => markReceivedByOperations(activeGroup));
+  receivedShippedBtn?.addEventListener("click", () => {
+    markReceivedAfterShipped(activeGroup);
+  });
 
   // Assign modal events
   assignClose?.addEventListener("click", closeAssignModal);
