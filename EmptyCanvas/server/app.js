@@ -4158,14 +4158,19 @@ app.post("/api/sv-orders/:id/quantity", requireAuth, requirePage("S.V schools or
   }
 });
 
-// ====== API: list S.V orders with tabs (Not Started / Approved / Rejected) ======
+// ====== API: list S.V orders (optionally filtered by tab) ======
 app.get("/api/sv-orders", requireAuth, requirePage("S.V schools orders"), async (req, res) => {
   try {
     // Map ?tab to S.V Approval label
+    // - tab=not-started | approved | rejected → server-side filter
+    // - tab=all → returns all items (client can group/filter)
     const tab = String(req.query.tab || "").toLowerCase();
     let label = "Not Started";
-    if (tab === "approved") label = "Approved";
+    if (tab === "all") label = null;
+    else if (tab === "approved") label = "Approved";
     else if (tab === "rejected") label = "Rejected";
+    else if (tab === "not-started" || tab === "not started") label = "Not Started";
+    else if (!tab) label = "Not Started"; // backward compatible default
 
     // Identify current Team Member (by session username)
     const userQuery = await notion.databases.query({
@@ -4187,17 +4192,166 @@ app.get("/api/sv-orders", requireAuth, requirePage("S.V schools orders"), async 
       svRelProp = null; // if relation missing in schema, ignore
     }
 
+    // ----- Notion "ID" (unique_id) helpers (same as /api/orders) -----
+    const getPropInsensitive = (props, name) => {
+      if (!props || !name) return null;
+      const target = String(name).trim().toLowerCase();
+      for (const [k, v] of Object.entries(props)) {
+        if (String(k).trim().toLowerCase() === target) return v;
+      }
+      return null;
+    };
+
+    const extractUniqueIdDetails = (prop) => {
+      try {
+        if (!prop) return { text: null, prefix: null, number: null };
+
+        // Native Notion "ID" property
+        if (prop.type === 'unique_id') {
+          const u = prop.unique_id;
+          if (!u || typeof u.number !== 'number') {
+            return { text: null, prefix: null, number: null };
+          }
+          const prefix = u.prefix ? String(u.prefix).trim() : '';
+          const number = u.number;
+          const text = prefix ? `${prefix}-${number}` : String(number);
+          return { text, prefix: prefix || null, number };
+        }
+
+        // Best-effort fallback (if "ID" is stored in another type)
+        let text = null;
+        if (prop.type === 'number' && typeof prop.number === 'number') text = String(prop.number);
+        if (prop.type === 'formula') {
+          if (prop.formula?.type === 'string') text = String(prop.formula.string || '').trim() || null;
+          if (prop.formula?.type === 'number' && typeof prop.formula.number === 'number') text = String(prop.formula.number);
+        }
+        if (prop.type === 'rich_text') {
+          text = (prop.rich_text || []).map((x) => x?.plain_text || '').join('').trim() || null;
+        }
+        if (prop.type === 'title') {
+          text = (prop.title || []).map((x) => x?.plain_text || '').join('').trim() || null;
+        }
+        if (!text) return { text: null, prefix: null, number: null };
+
+        // Try to parse prefix/number from a string like "ORD-95"
+        const m = String(text).trim().match(/^(.*?)(\d+)\s*$/);
+        const prefix = m ? String(m[1] || '').replace(/[-\s]+$/, '').trim() : '';
+        const number = m ? Number(m[2]) : null;
+        return {
+          text: String(text).trim(),
+          prefix: prefix || null,
+          number: Number.isFinite(number) ? number : null,
+        };
+      } catch {
+        return { text: null, prefix: null, number: null };
+      }
+    };
+
+    const getOrderUniqueIdDetails = (props) => {
+      const direct = getPropInsensitive(props, 'ID');
+      const d = extractUniqueIdDetails(direct);
+      if (d.text) return d;
+
+      // fallback: first unique_id property in the page
+      for (const v of Object.values(props || {})) {
+        if (v?.type === 'unique_id') {
+          const x = extractUniqueIdDetails(v);
+          if (x.text) return x;
+        }
+      }
+      return { text: null, prefix: null, number: null };
+    };
+
+    // ----- Product helpers (name, unit price, image) -----
+    const parseNumberProp = (prop) => {
+      if (!prop) return null;
+      try {
+        if (prop.type === "number") return prop.number ?? null;
+
+        if (prop.type === "formula") {
+          if (prop.formula?.type === "number") return prop.formula.number ?? null;
+          if (prop.formula?.type === "string") {
+            const n = parseFloat(String(prop.formula.string || "").replace(/[^0-9.]/g, ""));
+            return Number.isFinite(n) ? n : null;
+          }
+        }
+
+        if (prop.type === "rollup") {
+          if (prop.rollup?.type === "number") return prop.rollup.number ?? null;
+
+          if (prop.rollup?.type === "array") {
+            const arr = prop.rollup.array || [];
+            for (const x of arr) {
+              if (x.type === "number" && typeof x.number === "number") return x.number;
+              if (x.type === "formula" && x.formula?.type === "number") return x.formula.number;
+              if (x.type === "formula" && x.formula?.type === "string") {
+                const n = parseFloat(String(x.formula.string || "").replace(/[^0-9.]/g, ""));
+                if (Number.isFinite(n)) return n;
+              }
+              if (x.type === "rich_text") {
+                const t = (x.rich_text || []).map(r => r.plain_text).join("").trim();
+                const n = parseFloat(t.replace(/[^0-9.]/g, ""));
+                if (Number.isFinite(n)) return n;
+              }
+            }
+          }
+        }
+
+        if (prop.type === "rich_text") {
+          const t = (prop.rich_text || []).map(r => r.plain_text).join("").trim();
+          const n = parseFloat(t.replace(/[^0-9.]/g, ""));
+          return Number.isFinite(n) ? n : null;
+        }
+      } catch {}
+      return null;
+    };
+
+    const productCache = new Map();
+    async function getProductInfo(productPageId) {
+      if (!productPageId) return { name: null, unitPrice: null, image: null };
+      if (productCache.has(productPageId)) return productCache.get(productPageId);
+
+      try {
+        const productPage = await notion.pages.retrieve({ page_id: productPageId });
+        const name =
+          productPage.properties?.Name?.title?.[0]?.plain_text || null;
+
+        const unitPrice =
+          parseNumberProp(productPage.properties?.["Unity Price"]) ??
+          parseNumberProp(productPage.properties?.["Unit price"]) ??
+          parseNumberProp(productPage.properties?.["Unit Price"]) ??
+          parseNumberProp(productPage.properties?.["Price"]) ??
+          null;
+
+        let image = null;
+        if (productPage.cover?.type === "external") image = productPage.cover.external.url;
+        if (productPage.cover?.type === "file") image = productPage.cover.file.url;
+        if (!image && productPage.icon?.type === "external") image = productPage.icon.external.url;
+        if (!image && productPage.icon?.type === "file") image = productPage.icon.file.url;
+
+        const info = { name, unitPrice, image };
+        productCache.set(productPageId, info);
+        return info;
+      } catch {
+        const info = { name: null, unitPrice: null, image: null };
+        productCache.set(productPageId, info);
+        return info;
+      }
+    }
+
     // Build Notion filter
     const andFilter = [
-  { property: teamsProp, relation: { contains: userId } },
-];
+      { property: teamsProp, relation: { contains: userId } },
+    ];
 
-if (svRelProp) {
-  andFilter.push({
-    property: svRelProp,
-    relation: { contains: userId }
-  });
-}
+    if (svRelProp) {
+      andFilter.push({
+        property: svRelProp,
+        relation: { contains: userId }
+      });
+    }
+
+    // Only apply approval filter if a label is provided (tab !== all)
     if (label) {
       if (approvalType === "status") {
         andFilter.push({ property: approvalProp, status: { equals: label } });
@@ -4221,22 +4375,34 @@ if (svRelProp) {
       for (const page of resp.results) {
         const props = page.properties || {};
 
-        // Product name from relation if present
-        let productName = "Item";
+        // Notion Unique ID ("ID" property)
+        const uid = getOrderUniqueIdDetails(props);
+
+        // Product info from relation if present
+        let productName = props.Name?.title?.[0]?.plain_text || "Item";
+        let unitPrice = null;
+        let productImage = null;
+
         const productRel = props.Product?.relation;
-        if (Array.isArray(productRel) && productRel.length) {
-          try {
-            const productPage = await notion.pages.retrieve({ page_id: productRel[0].id });
-            productName = productPage.properties?.Name?.title?.[0]?.plain_text || productName;
-          } catch {}
-        } else {
-          productName = props.Name?.title?.[0]?.plain_text || productName;
+        const productPageId =
+          Array.isArray(productRel) && productRel.length ? productRel[0].id : null;
+
+        if (productPageId) {
+          const prod = await getProductInfo(productPageId);
+          if (prod?.name) productName = prod.name;
+          unitPrice = typeof prod?.unitPrice === "number" ? prod.unitPrice : null;
+          productImage = prod?.image || null;
         }
 
         items.push({
           id: page.id,
+          orderId: uid.text,
+          orderIdPrefix: uid.prefix,
+          orderIdNumber: uid.number,
           reason: props.Reason?.title?.[0]?.plain_text || "",
           productName,
+          productImage,
+          unitPrice,
           quantity: Number(props[reqQtyProp]?.number || 0),
           approval: props[approvalProp]?.select?.name || props[approvalProp]?.status?.name || "",
           createdTime: page.created_time,
