@@ -4192,6 +4192,17 @@ app.get("/api/sv-orders", requireAuth, requirePage("S.V schools orders"), async 
       svRelProp = null; // if relation missing in schema, ignore
     }
 
+    // Order process status (for tracking progress UI)
+    // Supports either a Notion "status" property or a "select".
+    const statusProp =
+      pickPropName(ordersProps, [
+        "Status",
+        "Order Status",
+        "Preparation Status",
+        "Prepared Status",
+        "state",
+      ]) || "Status";
+
     // ----- Notion "ID" (unique_id) helpers (same as /api/orders) -----
     const getPropInsensitive = (props, name) => {
       if (!props || !name) return null;
@@ -4404,6 +4415,7 @@ app.get("/api/sv-orders", requireAuth, requirePage("S.V schools orders"), async 
           productImage,
           unitPrice,
           quantity: Number(props[reqQtyProp]?.number || 0),
+          status: props[statusProp]?.select?.name || props[statusProp]?.status?.name || "",
           approval: props[approvalProp]?.select?.name || props[approvalProp]?.status?.name || "",
           createdTime: page.created_time,
         });
