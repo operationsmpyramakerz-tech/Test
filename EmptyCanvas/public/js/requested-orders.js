@@ -151,16 +151,23 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function setActiveStep(step) {
+    // Match Current Orders behavior:
+    // - Steps up to the current one are green
+    // - The current step has an extra highlight ring
+    const safe = Math.min(5, Math.max(1, Number(step) || 1));
+
     for (let i = 1; i <= 5; i++) {
       const el = stepEls[i];
       if (!el) continue;
-      el.classList.toggle("is-done", i < step);
-      el.classList.toggle("is-active", i === step);
+      el.classList.remove("is-done"); // legacy (no CSS)
+      el.classList.toggle("is-active", i <= safe);
+      el.classList.toggle("is-current", i === safe);
     }
     for (let i = 1; i <= 4; i++) {
       const el = connEls[i];
       if (!el) continue;
-      el.classList.toggle("is-done", i < step);
+      el.classList.remove("is-done"); // legacy (no CSS)
+      el.classList.toggle("is-active", i < safe);
     }
   }
 
@@ -537,10 +544,12 @@ document.addEventListener("DOMContentLoaded", () => {
         throw new Error(data.error || "Failed to update status");
       }
 
+      const newStatus = data.status || "Shipped";
+
       // Update local state
       const idSet = new Set(g.items.map((x) => x.id));
       allItems.forEach((it) => {
-        if (idSet.has(it.id)) it.status = "Shipped";
+        if (idSet.has(it.id)) it.status = newStatus;
       });
 
       // Re-render + move to Received tab
