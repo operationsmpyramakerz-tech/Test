@@ -23,7 +23,6 @@
     sub: document.getElementById("svModalSub"),
     orderId: document.getElementById("svModalOrderId"),
     date: document.getElementById("svModalDate"),
-    reason: document.getElementById("svModalReason"),
     approval: document.getElementById("svModalApproval"),
     components: document.getElementById("svModalComponents"),
     totalQty: document.getElementById("svModalTotalQty"),
@@ -364,12 +363,12 @@
     modalOverlay.dataset.groupId = group.groupId;
 
     const approval = group.approval || "Not Started";
+    const canAct = approvalKey(approval) === "not-started" && TAB === "not-started";
     if (modalEls.title) modalEls.title.textContent = approval;
     if (modalEls.sub) modalEls.sub.textContent = approvalSubtitle(approval);
 
     if (modalEls.orderId) modalEls.orderId.textContent = group.orderIdRange || "—";
     if (modalEls.date) modalEls.date.textContent = fmtCreated(group.latestCreated) || "—";
-    if (modalEls.reason) modalEls.reason.textContent = group.reason || "—";
     if (modalEls.approval) modalEls.approval.textContent = approval;
     if (modalEls.components) modalEls.components.textContent = String((group.products || []).length);
     if (modalEls.totalQty) modalEls.totalQty.textContent = String(group.totals?.totalQty ?? 0);
@@ -380,10 +379,43 @@
       if (!items.length) {
         modalEls.items.innerHTML = `<div class="muted">No items.</div>`;
       } else {
-        modalEls.items.innerHTML = items.map((it) => {
+        const bulkCard = canAct ? `
+          <div class="co-item" data-role="bulk-actions">
+            <div class="co-item-left">
+              <div class="co-item-name">Bulk actions</div>
+              <div class="co-item-sub">Approve or reject all components in this order.</div>
+            </div>
+            <div class="co-item-right">
+              <div class="btn-group" style="justify-content:flex-end; margin-top:8px;">
+                <button class="btn btn-success btn-xs sv-approve-all" type="button" title="Approve all">
+                  <i data-feather="check"></i> Approve all
+                </button>
+                <button class="btn btn-danger btn-xs sv-reject-all" type="button" title="Reject all">
+                  <i data-feather="x"></i> Reject all
+                </button>
+              </div>
+            </div>
+          </div>
+        `.trim() : "";
+
+        modalEls.items.innerHTML = bulkCard + items.map((it) => {
           const qty = Number(it.quantity) || 0;
           const unit = Number(it.unitPrice) || 0;
           const lineTotal = qty * unit;
+
+          const actionButtons = canAct ? `
+            <div class="btn-group" style="justify-content:flex-end; margin-top:8px;">
+              <button class="btn btn-warning btn-xs sv-edit" data-id="${escapeHTML(it.id)}" title="Edit qty">
+                <i data-feather="edit-2"></i> Edit
+              </button>
+              <button class="btn btn-success btn-xs sv-approve" data-id="${escapeHTML(it.id)}" title="Approve">
+                <i data-feather="check"></i> Approve
+              </button>
+              <button class="btn btn-danger btn-xs sv-reject" data-id="${escapeHTML(it.id)}" title="Reject">
+                <i data-feather="x"></i> Reject
+              </button>
+            </div>
+          `.trim() : "";
 
           return `
             <div class="co-item" data-id="${escapeHTML(it.id)}">
@@ -399,17 +431,7 @@
               <div class="co-item-right">
                 <div class="co-item-total">${escapeHTML(fmtMoney(lineTotal))}</div>
                 <div style="margin-top:6px;">${badgeForApproval(it.approval)}</div>
-                <div class="btn-group" style="justify-content:flex-end; margin-top:8px;">
-                  <button class="btn btn-warning btn-xs sv-edit" data-id="${escapeHTML(it.id)}" title="Edit qty">
-                    <i data-feather="edit-2"></i> Edit
-                  </button>
-                  <button class="btn btn-success btn-xs sv-approve" data-id="${escapeHTML(it.id)}" title="Approve">
-                    <i data-feather="check"></i> Approve
-                  </button>
-                  <button class="btn btn-danger btn-xs sv-reject" data-id="${escapeHTML(it.id)}" title="Reject">
-                    <i data-feather="x"></i> Reject
-                  </button>
-                </div>
+                ${actionButtons}
               </div>
             </div>
           `;
@@ -648,6 +670,65 @@
     }
   }
 
+  async function setBulkApproval(groupId, decision) {
+    if (!groupId) return;
+    const group = groupsById.get(groupId);
+    if (!group) return;
+
+    const normalized = normalizeApproval(decision);
+
+    // Only update items that actually need change
+    const ids = (group.products || []).map((x) => x && x.id).filter(Boolean);
+    const toUpdate = ids.filter((id) => {
+      const it = allItems.find((x) => String(x.id) === String(id));
+      return normalizeApproval(it?.approval) !== normalized;
+    });
+
+    if (!toUpdate.length) {
+      toastOK("Nothing to update.");
+      return;
+    }
+
+    destroyPopover();
+
+    // Disable bulk buttons while running
+    const bulkButtons = modalOverlay ? modalOverlay.querySelectorAll(".sv-approve-all, .sv-reject-all") : [];
+    bulkButtons.forEach((b) => { try { b.disabled = true; } catch {} });
+
+    let ok = 0;
+    let fail = 0;
+
+    try {
+      const concurrency = Math.min(3, toUpdate.length);
+      let cursor = 0;
+
+      const workers = Array.from({ length: concurrency }, async () => {
+        while (cursor < toUpdate.length) {
+          const id = toUpdate[cursor++];
+          try {
+            await http.post(`/api/sv-orders/${encodeURIComponent(id)}/approval`, { decision: normalized });
+
+            const idx = allItems.findIndex((x) => String(x.id) === String(id));
+            if (idx >= 0) allItems[idx].approval = normalized;
+            ok += 1;
+          } catch (e) {
+            console.error(e);
+            fail += 1;
+          }
+        }
+      });
+
+      await Promise.all(workers);
+
+      if (fail) toastERR(`Updated ${ok}/${toUpdate.length}. Some items failed.`);
+      else toastOK(`All items marked as ${normalized}.`);
+
+      renderAll({ preserveScroll: true, preserveModal: true });
+    } finally {
+      bulkButtons.forEach((b) => { try { b.disabled = false; } catch {} });
+    }
+  }
+
   // ===== Wire events =====
   function wireEvents() {
 
@@ -696,6 +777,19 @@ if (tabsWrap) {
       modalOverlay.addEventListener("click", (e) => {
         const btn = e.target.closest("button");
         if (!btn) return;
+
+        // Bulk actions
+        if (btn.classList.contains("sv-approve-all") || btn.classList.contains("sv-reject-all")) {
+          e.preventDefault();
+          e.stopPropagation();
+          const gid = modalOverlay?.dataset?.groupId;
+          if (!gid) return;
+          if (btn.classList.contains("sv-approve-all")) setBulkApproval(gid, "Approved");
+          else setBulkApproval(gid, "Rejected");
+          return;
+        }
+
+        // Per-item actions
         const id = btn.getAttribute("data-id");
         if (!id) return;
 
