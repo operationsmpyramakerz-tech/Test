@@ -1588,12 +1588,36 @@ app.post(
       if (!ids.length) return res.status(400).json({ error: "orderIds required" });
 
       const statusProp = await detectStatusPropName();
-      const sample = await notion.pages.retrieve({ page_id: ids[0] });
-      const statusType = sample.properties?.[statusProp]?.type;
+
+      // Determine property type + pick the *exact* option name from the DB (case-insensitive)
+      // to avoid Notion "option not found" errors due to casing/spacing differences.
+      const dbProps = await getOrdersDBProps();
+      const dbPropMeta = dbProps?.[statusProp];
+      let statusType = dbPropMeta?.type;
+      if (!statusType) {
+        const sample = await notion.pages.retrieve({ page_id: ids[0] });
+        statusType = sample.properties?.[statusProp]?.type;
+      }
+
+      const desired = "Shipped";
+      let shippedName = desired;
+      try {
+        const opts =
+          statusType === "status"
+            ? dbPropMeta?.status?.options
+            : dbPropMeta?.select?.options;
+        if (Array.isArray(opts) && opts.length) {
+          const norm = (s) => String(s || "").trim().toLowerCase();
+          const exact = opts.find((o) => norm(o?.name) === norm(desired));
+          const partial = opts.find((o) => norm(o?.name).includes(norm(desired)));
+          shippedName = (exact?.name || partial?.name || desired);
+        }
+      } catch {}
+
       const value =
         statusType === "status"
-          ? { status: { name: "Shipped" } }
-          : { select: { name: "Shipped" } };
+          ? { status: { name: shippedName } }
+          : { select: { name: shippedName } };
 
       await Promise.all(
         ids.map((id) =>
@@ -1606,7 +1630,7 @@ app.post(
         ),
       );
 
-      res.json({ success: true });
+      res.json({ success: true, status: shippedName });
     } catch (e) {
       console.error("mark-shipped error:", e.body || e);
       res.status(500).json({ error: "Failed to update status" });
@@ -1622,6 +1646,7 @@ app.post(
   requirePage("Requested Orders"),
   async (req, res) => {
     try {
+      const ExcelJS = require("exceljs");
       const { orderIds } = req.body || {};
       if (!Array.isArray(orderIds) || orderIds.length === 0) {
         return res.status(400).json({ error: "orderIds required" });
