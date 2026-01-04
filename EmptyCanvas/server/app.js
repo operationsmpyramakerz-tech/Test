@@ -1404,7 +1404,26 @@ app.get(
           if (!image && productPage.icon?.type === "external") image = productPage.icon.external.url;
           if (!image && productPage.icon?.type === "file") image = productPage.icon.file.url;
 
-          const url = productPage.url || null;
+          // Prefer the external product URL property (Products DB column "URL")
+          // Fallback to Notion page URL if the property is missing.
+          let url = null;
+          try {
+            const urlProp =
+              getPropInsensitive(productPage.properties, "URL") ||
+              getPropInsensitive(productPage.properties, "Url") ||
+              getPropInsensitive(productPage.properties, "Link") ||
+              getPropInsensitive(productPage.properties, "Website");
+
+            if (urlProp?.type === "url") url = urlProp.url || null;
+            if (!url && urlProp?.type === "rich_text") {
+              const t = (urlProp.rich_text || [])
+                .map((x) => x?.plain_text || "")
+                .join("")
+                .trim();
+              url = t || null;
+            }
+          } catch {}
+          if (!url) url = productPage.url || null;
           const info = { name, unitPrice, image, url };
           productCache.set(productPageId, info);
           return info;
@@ -1638,6 +1657,82 @@ app.post(
   },
 );
 
+// Mark a requested order as received after shipping (Status => "Arrived" / "Delivered")
+// Body: { orderIds: [notionPageId, ...] }
+app.post(
+  "/api/orders/requested/mark-arrived",
+  requireAuth,
+  requirePage("Requested Orders"),
+  async (req, res) => {
+    try {
+      const { orderIds } = req.body || {};
+      if (!Array.isArray(orderIds) || orderIds.length === 0) {
+        return res.status(400).json({ error: "orderIds required" });
+      }
+
+      const ids = orderIds
+        .map((x) => String(x || "").trim())
+        .filter(Boolean)
+        .map((x) => (looksLikeNotionId(x) ? toHyphenatedUUID(x) : x));
+
+      if (!ids.length) return res.status(400).json({ error: "orderIds required" });
+
+      const statusProp = await detectStatusPropName();
+
+      // Determine property type + pick the exact option name from the DB (case-insensitive)
+      const dbProps = await getOrdersDBProps();
+      const dbPropMeta = dbProps?.[statusProp];
+      let statusType = dbPropMeta?.type;
+      if (!statusType) {
+        const sample = await notion.pages.retrieve({ page_id: ids[0] });
+        statusType = sample.properties?.[statusProp]?.type;
+      }
+
+      const desiredCandidates = ["Arrived", "Delivered", "Received"]; // try these in order
+      let arrivedName = desiredCandidates[0];
+      try {
+        const opts =
+          statusType === "status"
+            ? dbPropMeta?.status?.options
+            : dbPropMeta?.select?.options;
+        if (Array.isArray(opts) && opts.length) {
+          const norm = (s) => String(s || "").trim().toLowerCase();
+          for (const cand of desiredCandidates) {
+            const exact = opts.find((o) => norm(o?.name) === norm(cand));
+            const partial = opts.find((o) => norm(o?.name).includes(norm(cand)));
+            const picked = exact?.name || partial?.name;
+            if (picked) {
+              arrivedName = picked;
+              break;
+            }
+          }
+        }
+      } catch {}
+
+      const value =
+        statusType === "status"
+          ? { status: { name: arrivedName } }
+          : { select: { name: arrivedName } };
+
+      await Promise.all(
+        ids.map((id) =>
+          notion.pages.update({
+            page_id: id,
+            properties: {
+              [statusProp]: value,
+            },
+          }),
+        ),
+      );
+
+      res.json({ success: true, status: arrivedName });
+    } catch (e) {
+      console.error("mark-arrived error:", e.body || e);
+      res.status(500).json({ error: "Failed to update status" });
+    }
+  },
+);
+
 // Export requested order to Excel
 // Body: { orderIds: [notionPageId, ...] }
 app.post(
@@ -1788,7 +1883,25 @@ app.post(
             parseNumberProp(p.properties?.["Unit Price"]) ??
             parseNumberProp(p.properties?.["Price"]) ??
             null;
-          const url = p.url || null;
+          // Prefer Products DB "URL" property (external website URL), fallback to Notion page URL.
+          let url = null;
+          try {
+            const urlProp =
+              getPropInsensitive(p.properties, "URL") ||
+              getPropInsensitive(p.properties, "Url") ||
+              getPropInsensitive(p.properties, "Link") ||
+              getPropInsensitive(p.properties, "Website");
+
+            if (urlProp?.type === "url") url = urlProp.url || null;
+            if (!url && urlProp?.type === "rich_text") {
+              const t = (urlProp.rich_text || [])
+                .map((x) => x?.plain_text || "")
+                .join("")
+                .trim();
+              url = t || null;
+            }
+          } catch {}
+          if (!url) url = p.url || null;
           const info = { name, unitPrice, url };
           productCache.set(productPageId, info);
           return info;
@@ -1888,14 +2001,14 @@ app.post(
           row.component,
           row.qty,
           row.reason,
-          row.link ? "Link" : "",
+          row.link || "",
           row.unit || "",
           row.total || "",
         ]);
 
-        // hyperlink
+        // hyperlink (show the actual URL text, pointing to the product website URL)
         if (row.link) {
-          r.getCell(4).value = { text: "Link", hyperlink: row.link };
+          r.getCell(4).value = { text: row.link, hyperlink: row.link };
           r.getCell(4).font = { color: { argb: "FF2563EB" }, underline: true };
         }
 
@@ -1909,7 +2022,7 @@ app.post(
         { width: 28 },
         { width: 10 },
         { width: 24 },
-        { width: 16 },
+        { width: 48 },
         { width: 12 },
         { width: 12 },
       ];
