@@ -54,7 +54,7 @@
 
   .cart-head{
     display: grid;
-    grid-template-columns: 2.4fr 1.2fr 1fr 0.6fr;
+    grid-template-columns: 2.2fr 0.9fr 1.2fr 1fr 0.6fr;
     gap: 0.9rem;
     padding: 1rem 1.25rem;
     background: #f8fafc;
@@ -70,12 +70,37 @@
 
   .cart-row{
     display: grid;
-    grid-template-columns: 2.4fr 1.2fr 1fr 0.6fr;
+    grid-template-columns: 2.2fr 0.9fr 1.2fr 1fr 0.6fr;
     gap: 0.9rem;
     padding: 1rem 1.25rem;
     border-top: 1px solid #f1f5f9;
     align-items: center;
   }
+
+  /* URL button */
+  .url-btn{
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    height: 36px;
+    padding: 0 14px;
+    border-radius: 999px;
+    border: 1px solid #e5e7eb;
+    background: #fff;
+    color: #0f172a;
+    font-weight: 800;
+    text-decoration: none;
+    box-shadow: 0 10px 18px -18px rgba(15, 23, 42, 0.55);
+    transition: transform 0.15s ease, background 0.15s ease;
+    white-space: nowrap;
+  }
+  .url-btn:hover{
+    background: #f1f5f9;
+    transform: translateY(-1px);
+  }
+  .url-btn i{ width: 16px; height: 16px; }
+  .url-empty{ color:#94a3b8; font-weight: 800; }
 
   .cart-product{
     display: flex;
@@ -406,7 +431,8 @@
     .cart-row{ grid-template-columns: 1fr; gap: 0.75rem; }
     .cart-row > div:nth-child(2),
     .cart-row > div:nth-child(3),
-    .cart-row > div:nth-child(4){
+    .cart-row > div:nth-child(4),
+    .cart-row > div:nth-child(5){
       display:flex;
       justify-content: space-between;
       align-items: center;
@@ -495,6 +521,7 @@
           <div class="cart-card" aria-label="Shopping cart items">
             <div class="cart-head">
               <div>Product</div>
+              <div>URL</div>
               <div>Quantity</div>
               <div>Total</div>
               <div>Action</div>
