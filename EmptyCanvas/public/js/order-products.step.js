@@ -254,6 +254,25 @@
       productCell.appendChild(thumb);
       productCell.appendChild(meta);
 
+      // URL cell (button opens component link)
+      const urlCell = document.createElement('div');
+      const safeUrl = safeHttpUrl(c?.url);
+      if (safeUrl) {
+        const linkBtn = document.createElement('a');
+        linkBtn.className = 'url-btn';
+        linkBtn.href = safeUrl;
+        linkBtn.target = '_blank';
+        linkBtn.rel = 'noopener noreferrer';
+        linkBtn.title = safeUrl;
+        linkBtn.innerHTML = '<i data-feather="external-link"></i><span>Open</span>';
+        urlCell.appendChild(linkBtn);
+      } else {
+        const empty = document.createElement('span');
+        empty.className = 'url-empty';
+        empty.textContent = '—';
+        urlCell.appendChild(empty);
+      }
+
       // Quantity cell
       const qtyCell = document.createElement('div');
       const qtyCtl = document.createElement('div');
@@ -310,6 +329,7 @@
       productCell.addEventListener('click', () => openModalForEdit(p.id));
 
       row.appendChild(productCell);
+      row.appendChild(urlCell);
       row.appendChild(qtyCell);
       row.appendChild(totalCell);
       row.appendChild(actionCell);
@@ -328,6 +348,17 @@
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#039;');
+  }
+
+  function safeHttpUrl(maybeUrl) {
+    try {
+      if (!maybeUrl) return null;
+      const u = new URL(String(maybeUrl));
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+      return u.toString();
+    } catch {
+      return null;
+    }
   }
 
   // ---------------------------- Cart mutations ----------------------------
