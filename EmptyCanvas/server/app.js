@@ -4774,6 +4774,43 @@ async function detectSVSchoolsPropName() {
     "S.V Schools"
   );
 }
+
+// Team Members DB: return the list of Team Member page IDs that the current
+// logged-in user (S.V) is allowed to review.
+//
+// Requirement: In S.V schools orders page, each user should see ONLY the orders
+// created by the Team Members listed in their "S.V Schools" column (relation)
+// inside the Team Members database.
+async function getVisibleTeamMemberIdsForSV(req) {
+  if (!teamMembersDatabaseId) return [];
+  const username = req.session?.username;
+  if (!username) return [];
+
+  try {
+    const userQuery = await notion.databases.query({
+      database_id: teamMembersDatabaseId,
+      filter: { property: "Name", title: { equals: username } },
+      page_size: 1,
+    });
+
+    if (!userQuery.results.length) return [];
+    const userPage = userQuery.results[0];
+    const p = userPage.properties || {};
+
+    const svSchoolsKey =
+      pickPropName(p, ["S.V Schools", "SV Schools", "S V Schools", "S.V schools"]) ||
+      "S.V Schools";
+
+    const rel = Array.isArray(p?.[svSchoolsKey]?.relation)
+      ? p[svSchoolsKey].relation
+      : [];
+
+    return rel.map((x) => x?.id).filter(Boolean);
+  } catch (err) {
+    console.error("getVisibleTeamMemberIdsForSV error:", err?.body || err);
+    return [];
+  }
+}
 async function detectSVApprovalPropName() {
   const props = await getOrdersDBProps();
   return (
@@ -4821,6 +4858,30 @@ app.post("/api/sv-orders/:id/quantity", requireAuth, requirePage("S.V schools or
     if (!pageId) return res.status(400).json({ error: "Missing id" });
     if (!Number.isFinite(value) || value < 0) return res.status(400).json({ error: "Invalid quantity" });
 
+    // Security: allow editing ONLY for orders created by members listed in
+    // the current user's "S.V Schools" column.
+    const visibleIds = await getVisibleTeamMemberIdsForSV(req);
+    if (!visibleIds.length) {
+      return res.status(403).json({ error: "Not allowed" });
+    }
+
+    try {
+      const teamsProp = await detectOrderTeamsMembersPropName();
+      const pg = await notion.pages.retrieve({ page_id: pageId });
+      const rel = Array.isArray(pg?.properties?.[teamsProp]?.relation)
+        ? pg.properties[teamsProp].relation
+        : [];
+      const ownerIds = rel.map((x) => x?.id).filter(Boolean);
+      const allowed = ownerIds.some((id) => visibleIds.includes(id));
+      if (!allowed) {
+        return res.status(403).json({ error: "Not allowed" });
+      }
+    } catch (secErr) {
+      console.error("SV quantity security check error:", secErr?.body || secErr);
+      // If the security check fails unexpectedly, fail closed.
+      return res.status(403).json({ error: "Not allowed" });
+    }
+
     const reqQtyProp = await detectRequestedQtyPropName();
     await notion.pages.update({ page_id: pageId, properties: { [reqQtyProp]: { number: Math.floor(value) } } });
     return res.json({ ok: true });
@@ -4844,25 +4905,20 @@ app.get("/api/sv-orders", requireAuth, requirePage("S.V schools orders"), async 
     else if (tab === "not-started" || tab === "not started") label = "Not Started";
     else if (!tab) label = "Not Started"; // backward compatible default
 
-    // Identify current Team Member (by session username)
-    const userQuery = await notion.databases.query({
-      database_id: teamMembersDatabaseId,
-      filter: { property: "Name", title: { equals: req.session.username } },
-    });
-    if (!userQuery.results.length) return res.status(404).json({ error: "User not found" });
-    const userId = userQuery.results[0].id;
+    // Identify which Team Members this S.V user can see (from Team Members DB)
+    const visibleIds = await getVisibleTeamMemberIdsForSV(req);
+    if (!visibleIds.length) {
+      // No supervised users → show empty list
+      res.set("Cache-Control", "no-store");
+      return res.json([]);
+    }
 
     // Resolve property names on Orders DB
     const reqQtyProp    = await detectRequestedQtyPropName();
     const approvalProp  = await detectSVApprovalPropName();
     const teamsProp     = await detectOrderTeamsMembersPropName();
-    let   svRelProp     = await detectSVSchoolsPropName();
-
     const ordersProps   = await getOrdersDBProps();
     const approvalType  = ordersProps[approvalProp]?.type || "select";
-    if (!ordersProps[svRelProp] || ordersProps[svRelProp].type !== "relation") {
-      svRelProp = null; // if relation missing in schema, ignore
-    }
 
     // Order process status (for tracking progress UI)
     // Supports either a Notion "status" property or a "select".
@@ -5022,17 +5078,16 @@ app.get("/api/sv-orders", requireAuth, requirePage("S.V schools orders"), async 
       }
     }
 
-    // Build Notion filter
-    const andFilter = [
-      { property: teamsProp, relation: { contains: userId } },
-    ];
+    // Build Notion filter:
+    // Show ONLY orders created by users listed in current user's "S.V Schools" column.
+    const orOwners = visibleIds.map((id) => ({
+      property: teamsProp,
+      relation: { contains: id },
+    }));
 
-    if (svRelProp) {
-      andFilter.push({
-        property: svRelProp,
-        relation: { contains: userId }
-      });
-    }
+    const andFilter = [
+      orOwners.length === 1 ? orOwners[0] : { or: orOwners },
+    ];
 
     // Only apply approval filter if a label is provided (tab !== all)
     if (label) {
@@ -5079,6 +5134,10 @@ app.get("/api/sv-orders", requireAuth, requirePage("S.V schools orders"), async 
 
         items.push({
           id: page.id,
+          // Who created this order item (Team Member relation)
+          teamMemberId: Array.isArray(props?.[teamsProp]?.relation) && props[teamsProp].relation.length
+            ? props[teamsProp].relation[0].id
+            : null,
           orderId: uid.text,
           orderIdPrefix: uid.prefix,
           orderIdNumber: uid.number,
@@ -5120,6 +5179,30 @@ app.post(
 
       if (!pageId || !decision) {
         return res.status(400).json({ ok:false, error: "Invalid id or decision" });
+      }
+
+      // Security: allow approval ONLY for orders created by members listed in
+      // the current user's "S.V Schools" column.
+      const visibleIds = await getVisibleTeamMemberIdsForSV(req);
+      if (!visibleIds.length) {
+        return res.status(403).json({ ok:false, error: "Not allowed" });
+      }
+
+      try {
+        const teamsProp = await detectOrderTeamsMembersPropName();
+        const pg = await notion.pages.retrieve({ page_id: pageId });
+        const rel = Array.isArray(pg?.properties?.[teamsProp]?.relation)
+          ? pg.properties[teamsProp].relation
+          : [];
+        const ownerIds = rel.map((x) => x?.id).filter(Boolean);
+        const allowed = ownerIds.some((id) => visibleIds.includes(id));
+        if (!allowed) {
+          return res.status(403).json({ ok:false, error: "Not allowed" });
+        }
+      } catch (secErr) {
+        console.error("SV approval security check error:", secErr?.body || secErr);
+        // Fail closed
+        return res.status(403).json({ ok:false, error: "Not allowed" });
       }
 
       const approvalProp = await detectSVApprovalPropName();
