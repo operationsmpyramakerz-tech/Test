@@ -253,6 +253,7 @@
     const sorted = (list || []).slice().sort((a, b) => toDate(b.createdTime) - toDate(a.createdTime));
 
     // Group by "date + time" to the minute (same as Current Orders)
+    // BUT also include teamMemberId so orders from different users don't merge.
     const pad2 = (n) => String(n).padStart(2, "0");
     const timeKey = (createdTime) => {
       const d = toDate(createdTime);
@@ -268,7 +269,7 @@
     const map = new Map();
 
     for (const o of sorted) {
-      const key = timeKey(o.createdTime);
+      const key = `${timeKey(o.createdTime)}|${o.teamMemberId || ""}`;
       let g = map.get(key);
 
       if (!g) {
