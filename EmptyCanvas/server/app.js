@@ -2721,6 +2721,46 @@ app.get(
       }
     };
 
+    // Extract a URL from a Notion property (supports url + rich_text/title fallbacks)
+    const extractUrl = (prop) => {
+      try {
+        if (!prop) return null;
+        if (prop.type === 'url') return prop.url || null;
+
+        const tryText = (text) => {
+          const s = String(text || '').trim();
+          if (!s) return null;
+          if (/^https?:\/\//i.test(s)) return s;
+          return null;
+        };
+
+        if (prop.type === 'rich_text') {
+          for (const rt of prop.rich_text || []) {
+            const href = rt?.href;
+            if (href) return String(href);
+            const t = tryText(rt?.plain_text);
+            if (t) return t;
+          }
+          return null;
+        }
+
+        if (prop.type === 'title') {
+          for (const t of prop.title || []) {
+            const href = t?.href;
+            if (href) return String(href);
+            const x = tryText(t?.plain_text);
+            if (x) return x;
+          }
+          return null;
+        }
+
+        // last resort: files/external
+        return extractFirstFileUrl(prop);
+      } catch {
+        return null;
+      }
+    };
+
     const extractNumber = (prop) => {
       try {
         if (!prop) return null;
@@ -2953,7 +2993,13 @@ app.get(
         const componentsFromPage = response.results
           .map((page) => {
             const titleProperty = page.properties?.Name;
-            const urlProperty = page.properties?.URL;
+
+            // URL: prefer a proper Notion URL property named "URL" (case-insensitive),
+            // but also accept common alternatives like "Link"/"Website".
+            const urlProperty =
+              getPropInsensitive(page.properties, 'URL') ||
+              getPropInsensitive(page.properties, 'Link') ||
+              getPropInsensitive(page.properties, 'Website');
             // Price: "Unity Price" (Number) in Products_Database
             const unitPriceProp =
               getPropInsensitive(page.properties, 'Unity Price') ||
@@ -2982,7 +3028,7 @@ app.get(
               return {
                 id: page.id,
                 name: titleProperty.title[0].plain_text,
-                url: urlProperty ? urlProperty.url : null,
+                url: extractUrl(urlProperty),
                 unitPrice: typeof unitPrice === 'number' && Number.isFinite(unitPrice) ? unitPrice : null,
                 displayId: displayId || null,
                 imageUrl: imageUrl || null,
