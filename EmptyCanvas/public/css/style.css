@@ -561,6 +561,16 @@ body.sidebar-collapsed .sidebar-toggle svg{ transform:rotate(180deg); }
   margin-top: 6px;
 }
 
+/* Replaces the big price line: show the creator name under the date */
+.co-createdby{
+  font-size: 24px;
+  font-weight: 900;
+  color: #111827;
+  line-height: 1.1;
+  margin-top: 10px;
+  word-break: break-word;
+}
+
 .co-price{
   font-size: 40px;
   font-weight: 900;
@@ -619,8 +629,9 @@ body.sidebar-collapsed .sidebar-toggle svg{ transform:rotate(180deg); }
   justify-content: center;
   padding: 14px 22px;
   border-radius: 999px;
-  background: #111827;
-  color: #fff;
+  background: var(--tag-bg, #111827);
+  color: var(--tag-fg, #fff);
+  border: 1px solid var(--tag-border, transparent);
   font-weight: 900;
   font-size: 14px;
   letter-spacing: .2px;
@@ -651,6 +662,7 @@ body.sidebar-collapsed .sidebar-toggle svg{ transform:rotate(180deg); }
   .co-est-value{ font-size: 24px; }
   .co-right-ico{ width: 46px; height: 46px; }
   .co-status-btn{ padding: 12px 18px; }
+  .co-createdby{ font-size: 20px; }
 }
 
 /* =================================
@@ -800,6 +812,37 @@ body.co-modal-open{ overflow: hidden; }
 }
 
 .co-item-name{ font-weight: 900; color: #111827; }
+
+/* Product name + link button in one line */
+.co-item-title{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.co-item-title .co-item-name{
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.co-item-link{
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #F3F4F6;
+  border: 1px solid #E5E7EB;
+  color: #111827;
+  flex-shrink: 0;
+  text-decoration: none;
+}
+
+.co-item-link svg{ width: 16px; height: 16px; }
 .co-item-sub{ margin-top: 4px; color: #6B7280; font-size: 13px; }
 
 .co-item-right{ text-align: right; flex-shrink: 0; }
@@ -814,8 +857,9 @@ body.co-modal-open{ overflow: hidden; }
   border-radius: 999px;
   font-size: 12px;
   font-weight: 900;
-  background: #111827;
-  color: #fff;
+  background: var(--tag-bg, #111827);
+  color: var(--tag-fg, #fff);
+  border: 1px solid var(--tag-border, transparent);
 }
 
 @media (max-width: 560px){
