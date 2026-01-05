@@ -54,6 +54,24 @@
     }
   })();
 
+  // Map Notion select/status colors to a pill background/foreground close to Notion labels
+  function notionColorVars(notionColor) {
+    const key = norm(String(notionColor || 'default').replace(/_background$/i, ''));
+    const map = {
+      default: { bg: '#E5E7EB', fg: '#374151', bd: '#D1D5DB' },
+      gray: { bg: '#E5E7EB', fg: '#374151', bd: '#D1D5DB' },
+      brown: { bg: '#F3E8E2', fg: '#6B4F3A', bd: '#E7D3C8' },
+      orange: { bg: '#FFEDD5', fg: '#9A3412', bd: '#FED7AA' },
+      yellow: { bg: '#FEF3C7', fg: '#92400E', bd: '#FDE68A' },
+      green: { bg: '#D1FAE5', fg: '#065F46', bd: '#A7F3D0' },
+      blue: { bg: '#DBEAFE', fg: '#1D4ED8', bd: '#BFDBFE' },
+      purple: { bg: '#EDE9FE', fg: '#6D28D9', bd: '#DDD6FE' },
+      pink: { bg: '#FCE7F3', fg: '#BE185D', bd: '#FBCFE8' },
+      red: { bg: '#FEE2E2', fg: '#B91C1C', bd: '#FECACA' },
+    };
+    return map[key] || map.default;
+  }
+
   function fmtMoney(value) {
     const n = Number(value);
     const safe = Number.isFinite(n) ? n : 0;
@@ -135,9 +153,10 @@
 
   function badgeForApproval(status) {
     const k = approvalKey(status);
-    if (k === "approved") return `<span class="badge badge--approved">Approved</span>`;
-    if (k === "rejected") return `<span class="badge badge--rejected">Rejected</span>`;
-    return `<span class="badge badge--notstarted">Not Started</span>`;
+    if (k === "approved") return `<span class="sv-approval-pill" style="--tag-bg:#D1FAE5;--tag-fg:#065F46;--tag-border:#A7F3D0;">Approved</span>`;
+    if (k === "rejected") return `<span class="sv-approval-pill" style="--tag-bg:#FEE2E2;--tag-fg:#B91C1C;--tag-border:#FECACA;">Rejected</span>`;
+    // Not Started should be yellow like Notion
+    return `<span class="sv-approval-pill" style="--tag-bg:#FEF3C7;--tag-fg:#92400E;--tag-border:#FDE68A;">Not Started</span>`;
   }
 
   // ===== Tracking progress (same flow as Current Orders) =====
@@ -275,7 +294,9 @@
       if (!g) {
         g = {
           timeKey: key,
-          groupId: o.id,
+          // Use a stable group id so the modal doesn't randomly close
+          // when items move between tabs (e.g. rejecting a single component).
+          groupId: key,
           latestCreated: o.createdTime,
           earliestCreated: o.createdTime,
           products: [],
@@ -293,9 +314,11 @@
 
       g.products.push(o);
 
+      // Creator name (displayed under date on the card)
+      if (!g.createdByName) g.createdByName = o.createdByName || null;
+
       if (!g.latestCreated || toDate(o.createdTime) > toDate(g.latestCreated)) {
         g.latestCreated = o.createdTime;
-        g.groupId = o.id;
       }
       if (!g.earliestCreated || toDate(o.createdTime) < toDate(g.earliestCreated)) {
         g.earliestCreated = o.createdTime;
@@ -311,9 +334,20 @@
 
       g.approval = computeGroupApproval(g.products);
 
-      const totalQty = g.products.reduce((sum, x) => sum + (Number(x.quantity) || 0), 0);
+      // Notion color of the S.V approval label (used to color the status pill)
+      g.approvalColor = (g.products[0] && g.products[0].approvalColor) ? g.products[0].approvalColor : null;
+
+      const totalQty = g.products.reduce((sum, x) => {
+        const q0 = Number(x.quantity) || 0;
+        const qe = (typeof x.quantityEdited === 'number' && Number.isFinite(x.quantityEdited)) ? x.quantityEdited : null;
+        const q = (qe !== null && qe !== undefined) ? Number(qe) : q0;
+        return sum + (Number.isFinite(q) ? q : 0);
+      }, 0);
+
       const estimateTotal = g.products.reduce((sum, x) => {
-        const q = Number(x.quantity) || 0;
+        const q0 = Number(x.quantity) || 0;
+        const qe = (typeof x.quantityEdited === 'number' && Number.isFinite(x.quantityEdited)) ? x.quantityEdited : null;
+        const q = (qe !== null && qe !== undefined) ? Number(qe) : q0;
         const p = Number(x.unitPrice) || 0;
         return sum + q * p;
       }, 0);
@@ -338,6 +372,10 @@
     const sub = created ? escapeHTML(created) : "—";
     const componentsPrice = fmtMoney(estimateTotal);
 
+    const creatorName = String(group.createdByName || first.createdByName || '').trim() || '—';
+
+    const statusVars = notionColorVars(group.approvalColor);
+
     const thumbLabel = String(group.orderIdRange || group.reason || "?").trim();
     const thumbHTML = first.productImage
       ? `<img src="${escapeHTML(first.productImage)}" alt="${escapeHTML(first.productName || thumbLabel)}" loading="lazy" />`
@@ -356,7 +394,7 @@
         <div class="co-main">
           <div class="co-title">${title}</div>
           <div class="co-sub">${sub}</div>
-          <div class="co-price">${componentsPrice}</div>
+          <div class="co-createdby">${escapeHTML(creatorName)}</div>
         </div>
 
         <div class="co-qty">x${Number.isFinite(componentsCount) ? componentsCount : 0}</div>
@@ -371,7 +409,7 @@
         </div>
 
         <div class="co-actions">
-          <span class="co-status-btn">${escapeHTML(group.approval || "Not Started")}</span>
+          <span class="co-status-btn" style="--tag-bg:${statusVars.bg};--tag-fg:${statusVars.fg};--tag-border:${statusVars.bd};">${escapeHTML(group.approval || "Not Started")}</span>
           <span class="co-right-ico" aria-hidden="true"><i data-feather="percent"></i></span>
         </div>
       </div>
@@ -420,7 +458,14 @@
 
     if (modalEls.orderId) modalEls.orderId.textContent = group.orderIdRange || "—";
     if (modalEls.date) modalEls.date.textContent = fmtCreated(group.latestCreated) || "—";
-    if (modalEls.approval) modalEls.approval.textContent = approval;
+    if (modalEls.approval) {
+      modalEls.approval.textContent = approval;
+      modalEls.approval.classList.add("sv-approval-pill");
+      const aVars = notionColorVars(group.approvalColor);
+      modalEls.approval.style.setProperty("--tag-bg", aVars.bg);
+      modalEls.approval.style.setProperty("--tag-fg", aVars.fg);
+      modalEls.approval.style.setProperty("--tag-border", aVars.bd);
+    }
     if (modalEls.components) modalEls.components.textContent = String((group.products || []).length);
     if (modalEls.totalQty) modalEls.totalQty.textContent = String(group.totals?.totalQty ?? 0);
     if (modalEls.totalPrice) modalEls.totalPrice.textContent = fmtMoney(group.totals?.estimateTotal ?? 0);
@@ -450,17 +495,23 @@
         `.trim() : "";
 
         modalEls.items.innerHTML = bulkCard + items.map((it) => {
-          const qty = Number(it.quantity) || 0;
+          const qtyReq = Number(it.quantity) || 0;
+          const qtyEdited = (typeof it.quantityEdited === 'number' && Number.isFinite(it.quantityEdited)) ? it.quantityEdited : null;
+          const qtyEffective = (qtyEdited !== null && qtyEdited !== undefined) ? Number(qtyEdited) : qtyReq;
           const unit = Number(it.unitPrice) || 0;
-          const lineTotal = qty * unit;
+          const lineTotal = qtyEffective * unit;
+
+          const showEdited = qtyEdited !== null && qtyEdited !== undefined && Number(qtyEdited) !== qtyReq;
+          const qtyHTML = showEdited
+            ? `<span class="sv-qty-diff"><span class="sv-qty-old">${escapeHTML(String(qtyReq))}</span><strong class="sv-qty-new" data-role="qty-val">${escapeHTML(String(qtyEdited))}</strong></span>`
+            : `<strong data-role="qty-val">${escapeHTML(String(qtyReq))}</strong>`;
+
+          const pillVars = notionColorVars(it.approvalColor);
 
           const actionButtons = canAct ? `
             <div class="btn-group" style="justify-content:flex-end; margin-top:8px;">
               <button class="btn btn-warning btn-xs sv-edit" data-id="${escapeHTML(it.id)}" title="Edit qty">
                 <i data-feather="edit-2"></i> Edit
-              </button>
-              <button class="btn btn-success btn-xs sv-approve" data-id="${escapeHTML(it.id)}" title="Approve">
-                <i data-feather="check"></i> Approve
               </button>
               <button class="btn btn-danger btn-xs sv-reject" data-id="${escapeHTML(it.id)}" title="Reject">
                 <i data-feather="x"></i> Reject
@@ -474,14 +525,16 @@
                 <div class="co-item-name">${escapeHTML(it.productName || "Unknown Product")}</div>
                 <div class="co-item-sub">
                   Reason: ${escapeHTML(it.reason || "—")}
-                  · Qty: <strong data-role="qty-val">${escapeHTML(String(qty))}</strong>
+                  · Qty: ${qtyHTML}
                   · Unit: ${escapeHTML(fmtMoney(unit))}
                 </div>
               </div>
 
               <div class="co-item-right">
                 <div class="co-item-total">${escapeHTML(fmtMoney(lineTotal))}</div>
-                <div style="margin-top:6px;">${badgeForApproval(it.approval)}</div>
+                <div style="margin-top:6px;">
+                  <span class="sv-approval-pill" style="--tag-bg:${pillVars.bg};--tag-fg:${pillVars.fg};--tag-border:${pillVars.bd};">${escapeHTML(normalizeApproval(it.approval))}</span>
+                </div>
                 ${actionButtons}
               </div>
             </div>
@@ -543,7 +596,10 @@
     popForId = id; popAnchor = btn;
 
     const it = allItems.find((x) => String(x.id) === String(id));
-    const currentVal = it ? (Number(it.quantity) || 0) : 0;
+    const edited = it && typeof it.quantityEdited === 'number' && Number.isFinite(it.quantityEdited)
+      ? Number(it.quantityEdited)
+      : null;
+    const currentVal = edited !== null ? edited : (it ? (Number(it.quantity) || 0) : 0);
 
     popEl = document.createElement("div");
     popEl.className = "sv-qty-popover";
@@ -583,7 +639,10 @@
 
         // update in-memory
         const idx = allItems.findIndex((x) => String(x.id) === String(id));
-        if (idx >= 0) allItems[idx].quantity = v;
+        if (idx >= 0) {
+          const req = Number(allItems[idx].quantity) || 0;
+          allItems[idx].quantityEdited = (v === req) ? null : v;
+        }
 
         toastOK("Quantity updated.");
         destroyPopover();
@@ -659,7 +718,11 @@
 
     const y = preserveScroll ? window.scrollY : 0;
 
-    allGroups = buildGroups(allItems);
+    // IMPORTANT: groups are built from items matching the current tab only.
+    // This allows per-component decisions (reject one item moves it to Rejected tab)
+    // while keeping the rest of the order in Not Started until bulk decision.
+    const itemsForTab = (allItems || []).filter((x) => approvalKey(normalizeApproval(x?.approval)) === TAB);
+    allGroups = buildGroups(itemsForTab);
     groupsById = new Map(allGroups.map((g) => [g.groupId, g]));
 
     applyFilter();
@@ -848,10 +911,6 @@ if (tabsWrap) {
           e.preventDefault();
           e.stopPropagation();
           openQtyPopover(btn, id);
-        } else if (btn.classList.contains("sv-approve")) {
-          e.preventDefault();
-          e.stopPropagation();
-          setApproval(id, "Approved");
         } else if (btn.classList.contains("sv-reject")) {
           e.preventDefault();
           e.stopPropagation();
