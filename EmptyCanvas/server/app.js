@@ -813,6 +813,77 @@ app.get(
         return { text: null, prefix: null, number: null };
       };
 
+      // ----- Helper: Team member names (Created By) -----
+      const nameCache = new Map();
+      async function memberName(id) {
+        if (!id) return "";
+        if (nameCache.has(id)) return nameCache.get(id);
+        try {
+          const page = await notion.pages.retrieve({ page_id: id });
+          const nm = page.properties?.Name?.title?.[0]?.plain_text || "";
+          nameCache.set(id, nm);
+          return nm;
+        } catch {
+          return "";
+        }
+      }
+
+      // ----- Helper: extract a URL from a Notion property (url + rich_text/title fallbacks) -----
+      const extractFirstFileUrl = (prop) => {
+        try {
+          if (!prop) return null;
+          if (prop.type === "files") {
+            const f = prop.files?.[0];
+            if (!f) return null;
+            if (f.type === "file") return f.file?.url || null;
+            if (f.type === "external") return f.external?.url || null;
+            return null;
+          }
+          if (prop.type === "url") return prop.url || null;
+          return null;
+        } catch {
+          return null;
+        }
+      };
+
+      const extractUrl = (prop) => {
+        try {
+          if (!prop) return null;
+          if (prop.type === "url") return prop.url || null;
+
+          const tryText = (text) => {
+            const s = String(text || "").trim();
+            if (!s) return null;
+            if (/^https?:\/\//i.test(s)) return s;
+            return null;
+          };
+
+          if (prop.type === "rich_text") {
+            for (const rt of prop.rich_text || []) {
+              const href = rt?.href;
+              if (href) return String(href);
+              const t = tryText(rt?.plain_text);
+              if (t) return t;
+            }
+            return null;
+          }
+
+          if (prop.type === "title") {
+            for (const t of prop.title || []) {
+              const href = t?.href;
+              if (href) return String(href);
+              const x = tryText(t?.plain_text);
+              if (x) return x;
+            }
+            return null;
+          }
+
+          return extractFirstFileUrl(prop);
+        } catch {
+          return null;
+        }
+      };
+
       while (hasMore) {
         const response = await notion.databases.query({
           database_id: ordersDatabaseId,
@@ -826,6 +897,7 @@ app.get(
           let productName = "Unknown Product";
           let unitPrice = null;
           let productImage = null;
+          let productUrl = null;
 
           // Helper to safely extract numbers from Notion props (number / formula / rollup / rich_text)
           const parseNumberProp = (prop) => {
@@ -894,6 +966,15 @@ app.get(
               if (productPage.cover?.type === "file") productImage = productPage.cover.file.url;
               if (!productImage && productPage.icon?.type === "external") productImage = productPage.icon.external.url;
               if (!productImage && productPage.icon?.type === "file") productImage = productPage.icon.file.url;
+
+              // Product URL (if exists)
+              const urlProp =
+                getPropInsensitive(productPage.properties, "URL") ||
+                getPropInsensitive(productPage.properties, "Link") ||
+                getPropInsensitive(productPage.properties, "Website") ||
+                getPropInsensitive(productPage.properties, "Product URL") ||
+                getPropInsensitive(productPage.properties, "Product Link");
+              productUrl = extractUrl(urlProp);
             } catch (e) {
               console.error(
                 "Could not retrieve related product page:",
@@ -903,6 +984,22 @@ app.get(
           }
 
           const uid = getOrderUniqueIdDetails(page.properties || {});
+
+          // Created by (Teams Members relation)
+          let createdById = "";
+          let createdByName = "";
+          const teamRel = page.properties?.["Teams Members"]?.relation;
+          if (Array.isArray(teamRel) && teamRel.length) {
+            createdById = teamRel[0].id;
+            createdByName = await memberName(createdById);
+          }
+
+          // Status + color (select/status)
+          const statusProp = page.properties?.["Status"];
+          const statusName =
+            statusProp?.select?.name || statusProp?.status?.name || "Pending";
+          const statusColor =
+            statusProp?.select?.color || statusProp?.status?.color || "default";
 
           allOrders.push({
             id: page.id,
@@ -914,10 +1011,13 @@ app.get(
               page.properties?.Reason?.title?.[0]?.plain_text || "No Reason",
             productName,
             productImage,
+            productUrl,
             unitPrice,
             quantity: page.properties?.["Quantity Requested"]?.number || 0,
-            status:
-              page.properties?.["Status"]?.select?.name || "Pending",
+            status: statusName,
+            statusColor,
+            createdById,
+            createdByName,
             createdTime: page.created_time,
           });
         }
