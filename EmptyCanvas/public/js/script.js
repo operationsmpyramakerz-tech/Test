@@ -8,7 +8,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // This file is included on multiple pages, so only run when the Current Orders list exists.
   if (!ordersListDiv) return;
 
-  const CACHE_KEY = 'ordersDataV3';
+  const CACHE_KEY = 'ordersDataV4';
   const CACHE_TTL_MS = 30 * 1000;
 
   let allOrders = [];
@@ -23,7 +23,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const modalEls = {
     statusTitle: document.getElementById('coModalStatusTitle'),
     statusSub: document.getElementById('coModalStatusSub'),
-    reason: document.getElementById('coModalReason'),
     date: document.getElementById('coModalDate'),
     components: document.getElementById('coModalComponents'),
     totalQty: document.getElementById('coModalTotalQty'),
@@ -44,6 +43,37 @@ document.addEventListener('DOMContentLoaded', () => {
       '"': '&quot;',
       "'": '&#39;',
     }[c]));
+
+  // Only allow http/https URLs to be opened from the UI
+  function safeHttpUrl(url) {
+    try {
+      const raw = String(url || '').trim();
+      if (!raw) return null;
+      const u = new URL(raw, window.location.origin);
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+      return u.toString();
+    } catch {
+      return null;
+    }
+  }
+
+  // Map Notion select/status colors to a pill background/foreground close to Notion labels
+  function notionColorVars(notionColor) {
+    const key = norm(String(notionColor || 'default').replace(/_background$/i, ''));
+    const map = {
+      default: { bg: '#E5E7EB', fg: '#374151', bd: '#D1D5DB' },
+      gray: { bg: '#E5E7EB', fg: '#374151', bd: '#D1D5DB' },
+      brown: { bg: '#F3E8E2', fg: '#6B4F3A', bd: '#E7D3C8' },
+      orange: { bg: '#FFEDD5', fg: '#9A3412', bd: '#FED7AA' },
+      yellow: { bg: '#FEF3C7', fg: '#92400E', bd: '#FDE68A' },
+      green: { bg: '#D1FAE5', fg: '#065F46', bd: '#A7F3D0' },
+      blue: { bg: '#DBEAFE', fg: '#1D4ED8', bd: '#BFDBFE' },
+      purple: { bg: '#EDE9FE', fg: '#6D28D9', bd: '#DDD6FE' },
+      pink: { bg: '#FCE7F3', fg: '#BE185D', bd: '#FBCFE8' },
+      red: { bg: '#FEE2E2', fg: '#B91C1C', bd: '#FECACA' },
+    };
+    return map[key] || map.default;
+  }
 
   const moneyFmt = (() => {
     try {
@@ -149,13 +179,21 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function computeStage(items) {
-    const idx = Math.max(
-      1,
-      ...(items || []).map((x) => statusToIndex(x.status)),
-    );
-    const safe = Math.min(5, Math.max(1, idx));
+    let bestIdx = 1;
+    let bestColor = null;
+    for (const it of items || []) {
+      const i = statusToIndex(it?.status);
+      if (i > bestIdx) {
+        bestIdx = i;
+        bestColor = it?.statusColor || null;
+      } else if (i === bestIdx && !bestColor && it?.statusColor) {
+        bestColor = it.statusColor;
+      }
+    }
+
+    const safe = Math.min(5, Math.max(1, bestIdx));
     const meta = STATUS_FLOW[safe - 1] || STATUS_FLOW[0];
-    return { idx: safe, label: meta.label, sub: meta.sub };
+    return { idx: safe, label: meta.label, sub: meta.sub, color: bestColor };
   }
 
   function setProgress(idx) {
@@ -190,7 +228,6 @@ document.addEventListener('DOMContentLoaded', () => {
       0,
     );
 
-    if (modalEls.reason) modalEls.reason.textContent = group.reason || '—';
     if (modalEls.date) modalEls.date.textContent = fmtCreated(group.latestCreated) || '—';
     if (modalEls.components) modalEls.components.textContent = String(items.length);
     if (modalEls.totalQty) modalEls.totalQty.textContent = String(totalQty);
@@ -208,16 +245,27 @@ document.addEventListener('DOMContentLoaded', () => {
           const unit = Number(it.unitPrice) || 0;
           const lineTotal = qty * unit;
 
+          const safeUrl = safeHttpUrl(it.productUrl);
+          const linkHTML = safeUrl
+            ? `<a class="co-item-link" href="${escapeHTML(safeUrl)}" target="_blank" rel="noopener noreferrer" title="Open link" aria-label="Open component link"><i data-feather="external-link"></i></a>`
+            : '';
+
+          const sVars = notionColorVars(it.statusColor);
+          const sStyle = `--tag-bg:${sVars.bg};--tag-fg:${sVars.fg};--tag-border:${sVars.bd};`;
+
           const row = document.createElement('div');
           row.className = 'co-item';
           row.innerHTML = `
             <div class="co-item-left">
-              <div class="co-item-name">${escapeHTML(it.productName || 'Unknown Product')}</div>
+              <div class="co-item-title">
+                <div class="co-item-name">${escapeHTML(it.productName || 'Unknown Product')}</div>
+                ${linkHTML}
+              </div>
               <div class="co-item-sub">Reason: ${escapeHTML(it.reason || '—')} · Qty: ${escapeHTML(String(qty))} · Unit: ${escapeHTML(fmtMoney(unit))}</div>
             </div>
             <div class="co-item-right">
               <div class="co-item-total">${escapeHTML(fmtMoney(lineTotal))}</div>
-              <div class="co-item-status">${escapeHTML(it.status || '—')}</div>
+              <div class="co-item-status" style="${sStyle}">${escapeHTML(it.status || '—')}</div>
             </div>
           `;
           frag.appendChild(row);
@@ -301,11 +349,16 @@ document.addEventListener('DOMContentLoaded', () => {
           reason: '—',
           reasons: [],
           orderIdRange: null,
+          createdByName: o.createdByName || '',
         };
         map.set(key, g);
       }
 
       g.products.push(o);
+
+      if (!g.createdByName && o.createdByName) {
+        g.createdByName = o.createdByName;
+      }
 
       if (!g.latestCreated || toDate(o.createdTime) > toDate(g.latestCreated)) {
         g.latestCreated = o.createdTime;
@@ -351,13 +404,17 @@ document.addEventListener('DOMContentLoaded', () => {
     const created = fmtDateOnly(group.latestCreated);
     const stage = computeStage(items);
 
+    const statusVars = notionColorVars(stage.color);
+    const statusStyle = `--tag-bg:${statusVars.bg};--tag-fg:${statusVars.fg};--tag-border:${statusVars.bd};`;
+
     const title = escapeHTML(group.orderIdRange || group.reason);
 
     // Under the title we show the date (per requested mapping)
     const sub = created ? escapeHTML(created) : '—';
 
-    // Card price shows components total price (per requested mapping)
+    // Keep total price for the Estimate section, but show the order creator under the date
     const componentsPrice = fmtMoney(estimateTotal);
+    const createdBy = String(group.createdByName || first.createdByName || '').trim();
 
     const thumbLabel = String(group.orderIdRange || group.reason || '?').trim();
     const thumbHTML = first.productImage
@@ -377,7 +434,7 @@ document.addEventListener('DOMContentLoaded', () => {
         <div class="co-main">
           <div class="co-title">${title}</div>
           <div class="co-sub">${sub}</div>
-          <div class="co-price">${componentsPrice}</div>
+          <div class="co-createdby">${escapeHTML(createdBy || '—')}</div>
         </div>
 
         <div class="co-qty">x${Number.isFinite(componentsCount) ? componentsCount : 0}</div>
@@ -392,7 +449,7 @@ document.addEventListener('DOMContentLoaded', () => {
         </div>
 
         <div class="co-actions">
-          <span class="co-status-btn">${escapeHTML(stage.label)}</span>
+          <span class="co-status-btn" style="${statusStyle}">${escapeHTML(stage.label)}</span>
           <span class="co-right-ico" aria-hidden="true"><i data-feather="percent"></i></span>
         </div>
       </div>
