@@ -1278,6 +1278,7 @@ app.get(
       console.error("Error fetching tracking data:", error.body || error);
       return res.status(500).json({ error: "Failed to fetch tracking data." });
     }
+
   },
 );
 
@@ -4972,6 +4973,23 @@ async function detectRequestedQtyPropName() {
   );
 }
 
+// Quantity edited by supervisor (stores the new qty without overwriting the requested qty)
+async function detectSupervisorEditedQtyPropName() {
+  const props = await getOrdersDBProps();
+  return (
+    pickPropName(props, [
+      "Quantity Edited by supervisor",
+      "Quantity Edited by Supervisor",
+      "Qty Edited by supervisor",
+      "Qty Edited by Supervisor",
+      "Supervisor Qty",
+      "Quantity Edited",
+      "Edited Quantity",
+    ]) ||
+    "Quantity Edited by supervisor"
+  );
+}
+
 // Detect the "Teams Members" relation column on the Orders DB
 async function detectOrderTeamsMembersPropName() {
   const props = await getOrdersDBProps();
@@ -5029,8 +5047,22 @@ app.post("/api/sv-orders/:id/quantity", requireAuth, requirePage("S.V schools or
     }
 
     const reqQtyProp = await detectRequestedQtyPropName();
-    await notion.pages.update({ page_id: pageId, properties: { [reqQtyProp]: { number: Math.floor(value) } } });
-    return res.json({ ok: true });
+    const editedQtyProp = await detectSupervisorEditedQtyPropName();
+
+    // Keep the original "Quantity Requested" intact and store edits in
+    // "Quantity Edited by supervisor".
+    const pg = await notion.pages.retrieve({ page_id: pageId });
+    const requested = Number(pg?.properties?.[reqQtyProp]?.number ?? 0);
+    const newVal = Math.max(0, Math.floor(value));
+    const editedVal = (Number.isFinite(requested) && newVal === requested) ? null : newVal;
+
+    await notion.pages.update({
+      page_id: pageId,
+      properties: {
+        [editedQtyProp]: { number: editedVal },
+      },
+    });
+    return res.json({ ok: true, value: newVal, cleared: editedVal === null });
   } catch (e) {
     console.error("POST /api/sv-orders/:id/quantity error:", e?.body || e);
     return res.status(500).json({ error: "Failed to update quantity" });
@@ -5061,6 +5093,7 @@ app.get("/api/sv-orders", requireAuth, requirePage("S.V schools orders"), async 
 
     // Resolve property names on Orders DB
     const reqQtyProp    = await detectRequestedQtyPropName();
+    const editedQtyProp = await detectSupervisorEditedQtyPropName();
     const approvalProp  = await detectSVApprovalPropName();
     const teamsProp     = await detectOrderTeamsMembersPropName();
     const ordersProps   = await getOrdersDBProps();
@@ -5224,6 +5257,16 @@ app.get("/api/sv-orders", requireAuth, requirePage("S.V schools orders"), async 
       }
     }
 
+    // Resolve Team Member page title (creator name) once per id
+    const svTeamMemberNameCache = new Map();
+    async function getSVTeamMemberName(teamMemberPageId) {
+      if (!teamMemberPageId) return null;
+      if (svTeamMemberNameCache.has(teamMemberPageId)) return svTeamMemberNameCache.get(teamMemberPageId);
+      const name = (await pageTitleById(teamMemberPageId)) || null;
+      svTeamMemberNameCache.set(teamMemberPageId, name);
+      return name;
+    }
+
     // Build Notion filter:
     // Show ONLY orders created by users listed in current user's "S.V Schools" column.
     const orOwners = visibleIds.map((id) => ({
@@ -5278,12 +5321,25 @@ app.get("/api/sv-orders", requireAuth, requirePage("S.V schools orders"), async 
           productImage = prod?.image || null;
         }
 
+        const teamMemberId = Array.isArray(props?.[teamsProp]?.relation) && props[teamsProp].relation.length
+          ? props[teamsProp].relation[0].id
+          : null;
+
+        const approvalObj = props[approvalProp]?.select || props[approvalProp]?.status || null;
+        const approvalName = approvalObj?.name || "";
+        const approvalColor = approvalObj?.color || null;
+
+        const createdByName = await getSVTeamMemberName(teamMemberId);
+
+        const qtyRequested = Number(props[reqQtyProp]?.number || 0);
+        const qtyEditedRaw = props?.[editedQtyProp]?.number;
+        const qtyEdited = (typeof qtyEditedRaw === 'number' && Number.isFinite(qtyEditedRaw)) ? qtyEditedRaw : null;
+
         items.push({
           id: page.id,
           // Who created this order item (Team Member relation)
-          teamMemberId: Array.isArray(props?.[teamsProp]?.relation) && props[teamsProp].relation.length
-            ? props[teamsProp].relation[0].id
-            : null,
+          teamMemberId,
+          createdByName,
           orderId: uid.text,
           orderIdPrefix: uid.prefix,
           orderIdNumber: uid.number,
@@ -5291,9 +5347,11 @@ app.get("/api/sv-orders", requireAuth, requirePage("S.V schools orders"), async 
           productName,
           productImage,
           unitPrice,
-          quantity: Number(props[reqQtyProp]?.number || 0),
+          quantity: qtyRequested,
+          quantityEdited: qtyEdited,
           status: props[statusProp]?.select?.name || props[statusProp]?.status?.name || "",
-          approval: props[approvalProp]?.select?.name || props[approvalProp]?.status?.name || "",
+          approval: approvalName,
+          approvalColor,
           createdTime: page.created_time,
         });
       }
