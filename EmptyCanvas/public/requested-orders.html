@@ -4,12 +4,11 @@
 <head>
 <meta charset="utf-8"/>
 <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-<title>Operations Requested Orders</title>
+<title>Operations Orders</title>
 <!-- CRITICAL: Prevent sidebar links flash before CSS/permissions load -->
 <style>
   body.permissions-loading .sidebar li { display: none !important; }
 </style>
-<link href="https://cdn.jsdelivr.net/npm/choices.js/public/assets/styles/choices.min.css" rel="stylesheet"/>
 <link href="/css/style.css" rel="stylesheet"/>
 <script src="https://unpkg.com/feather-icons"></script>
 </head>
@@ -43,7 +42,7 @@
 <li>
 <a class="nav-link active" href="/orders/requested">
 <i data-feather="users"></i>
-<span class="nav-label">Operations Requested Orders</span>
+<span class="nav-label">Operations Orders</span>
 </a>
 </li>
 <li>
@@ -112,7 +111,7 @@
 </span>
 <div class="greet-text">
 <div class="greet-title">Hi, <span data-username="">...</span> 👋</div>
-<div class="greet-sub">Manage requested orders</div>
+<div class="greet-sub">Manage operations orders</div>
 </div>
 </div>
 <div class="searchbar" id="req-searchbar" role="search" style="margin-left:8px;">
@@ -128,7 +127,7 @@
 </div>
 </div>
 <div class="header-row2">
-<h1 class="page-title">Operations Requested Orders</h1>
+<h1 class="page-title">Operations Orders</h1>
 </div>
 </header>
 <main class="page-body">
@@ -182,7 +181,10 @@
         <div class="co-meta-row"><span>Order ID</span><strong id="reqModalOrderId">—</strong></div>
         <div class="co-meta-row"><span>Team member</span><strong id="reqModalCreatedBy">—</strong></div>
         <div class="co-meta-row"><span>Date</span><strong id="reqModalDate">—</strong></div>
-        <div class="co-meta-row"><span>Assigned to</span><strong id="reqModalAssignedTo">—</strong></div>
+<div class="co-meta-row">
+  <span>Received by</span>
+  <strong id="reqModalOperationsBy">—</strong>
+</div>
         <div class="co-meta-row"><span>Components</span><strong id="reqModalComponents">—</strong></div>
         <div class="co-meta-row"><span>Total quantity</span><strong id="reqModalTotalQty">—</strong></div>
         <div class="co-meta-row"><span>Estimate total</span><strong id="reqModalTotalPrice">—</strong></div>
@@ -209,22 +211,6 @@
 </div>
 </div>
 </div>
-<!-- Assign modal -->
-<div aria-hidden="true" class="modal" id="assignModal">
-<div aria-modal="true" class="modal-content" role="dialog">
-<button aria-label="Close" class="close-btn" id="assignClose"><i data-feather="x"></i></button>
-<h3 style="margin-bottom:.75rem;">Assign order</h3>
-<div class="form-group">
-<label for="assignSelect">Select member</label>
-<select id="assignSelect" multiple="" size="6"></select>
-</div>
-<div class="form-actions">
-<button class="nav-link" id="assignCancel" style="padding:.6rem 1rem; border:1px solid #D1D5DB; border-radius:8px; background:#fff; color:#374151;">Cancel</button>
-<button class="submit-btn" id="assignApply">Assign</button>
-</div>
-</div>
-</div>
-<script src="https://cdn.jsdelivr.net/npm/choices.js/public/assets/scripts/choices.min.js"></script>
 <script>feather.replace();</script>
 <script src="/js/common-ui.js"></script>
 <script src="/js/requested-orders.js"></script>
