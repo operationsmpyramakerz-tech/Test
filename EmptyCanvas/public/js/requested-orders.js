@@ -1,134 +1,153 @@
 // public/js/requested-orders.js
-// Operations Requested Orders
-// - Cards styled like Current Orders
-// - Tabs: Not Started / Received / Delivered
-// - Click card => Tracking modal with details + components
-// - Download Excel
-// - "Received by operations" => sets Status to "Shipped"
-
+// Operations Orders (Schools orders requested) — requested list + tracking modal
 document.addEventListener("DOMContentLoaded", () => {
-  // List + search
-  const listDiv = document.getElementById("requested-list");
+  // ---------- DOM ----------
   const searchInput = document.getElementById("requestedSearch");
+  const listDiv = document.getElementById("requested-list");
   const tabsWrap = document.getElementById("reqTabs");
 
-  // Tracking modal
+  // Modal
   const orderModal = document.getElementById("reqOrderModal");
   const modalClose = document.getElementById("reqModalClose");
   const modalTitle = document.getElementById("reqModalTitle");
   const modalSub = document.getElementById("reqModalSub");
+
   const modalOrderId = document.getElementById("reqModalOrderId");
   const modalCreatedBy = document.getElementById("reqModalCreatedBy");
   const modalDate = document.getElementById("reqModalDate");
-  const modalAssignedTo = document.getElementById("reqModalAssignedTo");
+  const modalOperationsBy = document.getElementById("reqModalOperationsBy");
   const modalComponents = document.getElementById("reqModalComponents");
   const modalTotalQty = document.getElementById("reqModalTotalQty");
   const modalTotalPrice = document.getElementById("reqModalTotalPrice");
   const modalItems = document.getElementById("reqModalItems");
-  const excelBtn = document.getElementById("reqExcelBtn");
-  const receivedBtn = document.getElementById("reqReceivedBtn");
-  const receivedShippedBtn = document.getElementById("reqReceivedShippedBtn");
 
-  const stepEls = [
-    null,
-    document.getElementById("reqStep1"),
-    document.getElementById("reqStep2"),
-    document.getElementById("reqStep3"),
-    document.getElementById("reqStep4"),
-    document.getElementById("reqStep5"),
-  ];
-  const connEls = [
-    null,
-    document.getElementById("reqConn1"),
-    document.getElementById("reqConn2"),
-    document.getElementById("reqConn3"),
-    document.getElementById("reqConn4"),
-  ];
+  const excelBtn = document.getElementById("reqDownloadExcelBtn");
+  const shippedBtn = document.getElementById("reqMarkShippedBtn");
+  const arrivedBtn = document.getElementById("reqMarkArrivedBtn");
 
-  // Assign modal (keep existing behavior)
-  const assignModal = document.getElementById("assignModal");
-  const assignClose = document.getElementById("assignClose");
-  const assignCancel = document.getElementById("assignCancel");
-  const assignApply = document.getElementById("assignApply");
-  const assignSelect = document.getElementById("assignSelect");
-  let choiceInst = null;
-
-  // Data
-  let allItems = [];
-  let groups = [];
-  let teamMembers = [];
-  let selectedGroup = null; // for assignment
-  let activeGroup = null; // for tracking modal actions
-
-  // ---------------- Helpers ----------------
-  const norm = (s) => String(s || "").toLowerCase().trim();
-  const escapeHTML = (s) =>
-    String(s ?? "").replace(/[&<>"']/g, (c) =>
-      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]),
-    );
-  const toMinuteKey = (iso) => String(iso || "").slice(0, 16); // YYYY-MM-DDTHH:MM
-
-  function parseCurrencySymbol() {
-    // Default to GBP for the UI (matches current orders)
-    return "£";
-  }
-
-  const fmtMoney = (n) => {
-    const num = Number(n);
-    const val = Number.isFinite(num) ? num : 0;
-    const sym = parseCurrencySymbol();
-    return (
-      sym +
-      val.toLocaleString("en-GB", {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-      })
-    );
+  // Tracker steps
+  const stepEls = {
+    1: document.getElementById("reqStep1"),
+    2: document.getElementById("reqStep2"),
+    3: document.getElementById("reqStep3"),
+    4: document.getElementById("reqStep4"),
+    5: document.getElementById("reqStep5"),
+  };
+  const connEls = {
+    1: document.getElementById("reqConn1"),
+    2: document.getElementById("reqConn2"),
+    3: document.getElementById("reqConn3"),
+    4: document.getElementById("reqConn4"),
   };
 
-  const fmtDateOnly = (iso) =>
-    new Date(iso).toLocaleDateString("en-US", {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-    });
+  // ---------- Utils ----------
+  const norm = (s) => String(s || "").trim().toLowerCase();
 
-  const fmtDateTime = (iso) =>
-    new Date(iso).toLocaleString("en-US", {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
+  const escapeHTML = (str) =>
+    String(str || "").replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    }[c]));
 
-  // ---------------- Status / Tracking ----------------
+  // Only allow http/https URLs to be opened from the UI
+  function safeHttpUrl(url) {
+    try {
+      const raw = String(url || "").trim();
+      if (!raw) return null;
+      const u = new URL(raw, window.location.origin);
+      if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+      return u.toString();
+    } catch {
+      return null;
+    }
+  }
+
+  // Map Notion select/status colors to a pill background/foreground close to Notion labels
+  function notionColorVars(notionColor) {
+    const key = norm(String(notionColor || "default").replace(/_background$/i, ""));
+    const map = {
+      default: { bg: "#E5E7EB", fg: "#374151", bd: "#D1D5DB" },
+      gray: { bg: "#E5E7EB", fg: "#374151", bd: "#D1D5DB" },
+      brown: { bg: "#F3E8E2", fg: "#6B4F3A", bd: "#E7D3C8" },
+      orange: { bg: "#FFEDD5", fg: "#9A3412", bd: "#FED7AA" },
+      yellow: { bg: "#FEF3C7", fg: "#92400E", bd: "#FDE68A" },
+      green: { bg: "#D1FAE5", fg: "#065F46", bd: "#A7F3D0" },
+      blue: { bg: "#DBEAFE", fg: "#1D4ED8", bd: "#BFDBFE" },
+      purple: { bg: "#EDE9FE", fg: "#6D28D9", bd: "#DDD6FE" },
+      pink: { bg: "#FCE7F3", fg: "#BE185D", bd: "#FBCFE8" },
+      red: { bg: "#FEE2E2", fg: "#B91C1C", bd: "#FECACA" },
+    };
+    return map[key] || map.default;
+  }
+
+  const moneyFmt = (() => {
+    try {
+      return new Intl.NumberFormat("en-GB", { style: "currency", currency: "GBP" });
+    } catch {
+      return null;
+    }
+  })();
+
+  function fmtMoney(value) {
+    const n = Number(value);
+    const safe = Number.isFinite(n) ? n : 0;
+    if (moneyFmt) return moneyFmt.format(safe);
+    return `£${safe.toFixed(2)}`;
+  }
+
+  function toDate(v) {
+    if (!v) return null;
+    try {
+      const d = v instanceof Date ? v : new Date(v);
+      return Number.isFinite(d.getTime()) ? d : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function fmtDateOnly(dateLike) {
+    const d = toDate(dateLike);
+    if (!d) return "";
+    try {
+      return d.toLocaleDateString("en-GB", { year: "numeric", month: "short", day: "numeric" });
+    } catch {
+      return d.toISOString().slice(0, 10);
+    }
+  }
+
+  function fmtDateTime(dateLike) {
+    const d = toDate(dateLike);
+    if (!d) return "";
+    try {
+      return d.toLocaleString("en-GB", {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    } catch {
+      return d.toISOString();
+    }
+  }
+
+  function toast(type, title, message) {
+    if (window.UI?.toast) {
+      window.UI.toast({ type, title, message });
+    }
+  }
+
+  // ---------- Status / Tabs ----------
+  // NOTE: "Delivered" tab maps to Arrived/Delivered/Received.
   const STATUS_FLOW = [
-    {
-      key: "placed",
-      label: "Order Placed",
-      sub: "We received your order.",
-    },
-    {
-      key: "supervision",
-      label: "Under Supervision",
-      sub: "Your order is under supervision.",
-    },
-    {
-      key: "progress",
-      label: "In progress",
-      sub: "We are preparing your order.",
-    },
-    {
-      key: "shipped",
-      label: "Shipped",
-      sub: "Your order is on the way.",
-    },
-    {
-      key: "arrived",
-      label: "Arrived",
-      sub: "Your order has arrived.",
-    },
+    { key: "placed", label: "Order Placed", sub: "We received your order." },
+    { key: "supervision", label: "Under Supervision", sub: "Your order is under supervision." },
+    { key: "progress", label: "In progress", sub: "We are preparing your order." },
+    { key: "shipped", label: "Shipped", sub: "Your order is on the way." },
+    { key: "arrived", label: "Arrived", sub: "Your order has arrived." },
   ];
 
   function statusToIndex(status) {
@@ -141,8 +160,22 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function computeStage(items) {
-    const idx = Math.max(1, ...(items || []).map((it) => statusToIndex(it.status)));
-    return { ...(STATUS_FLOW[idx - 1] || STATUS_FLOW[0]), idx };
+    const list = Array.isArray(items) ? items : [];
+    let bestIdx = 1;
+    let bestColor = null;
+
+    for (const it of list) {
+      const idx = statusToIndex(it.status);
+      if (idx > bestIdx) {
+        bestIdx = idx;
+        bestColor = it.statusColor || null;
+      } else if (idx === bestIdx && !bestColor) {
+        bestColor = it.statusColor || null;
+      }
+    }
+
+    const base = STATUS_FLOW[bestIdx - 1] || STATUS_FLOW[0];
+    return { ...base, idx: bestIdx, color: bestColor };
   }
 
   function tabFromStageIdx(idx) {
@@ -151,41 +184,43 @@ document.addEventListener("DOMContentLoaded", () => {
     return "not-started";
   }
 
-  function setActiveStep(step) {
-    // Match Current Orders behavior:
-    // - Steps up to the current one are green
-    // - The current step has an extra highlight ring
-    const safe = Math.min(5, Math.max(1, Number(step) || 1));
+  function readTabFromUrl() {
+    const url = new URL(window.location.href);
+    const tab = norm(url.searchParams.get("tab"));
+    const allowed = new Set(["not-started", "received", "delivered"]);
+    return allowed.has(tab) ? tab : "not-started";
+  }
 
+  function updateTabUI() {
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", currentTab);
+    window.history.replaceState({}, "", url);
+
+    const tabs = tabsWrap ? Array.from(tabsWrap.querySelectorAll(".tab-portfolio")) : [];
+    tabs.forEach((a) => {
+      const t = norm(a.getAttribute("data-tab"));
+      const active = t === currentTab;
+      a.classList.toggle("is-active", active);
+      a.setAttribute("aria-selected", active ? "true" : "false");
+    });
+  }
+
+  function setActiveStep(step) {
+    const safe = Math.min(5, Math.max(1, Number(step) || 1));
     for (let i = 1; i <= 5; i++) {
       const el = stepEls[i];
       if (!el) continue;
-      el.classList.remove("is-done"); // legacy (no CSS)
       el.classList.toggle("is-active", i <= safe);
       el.classList.toggle("is-current", i === safe);
     }
     for (let i = 1; i <= 4; i++) {
       const el = connEls[i];
       if (!el) continue;
-      el.classList.remove("is-done"); // legacy (no CSS)
       el.classList.toggle("is-active", i < safe);
     }
   }
 
-  // ---------------- Grouping ----------------
-  function namesForItem(it) {
-    if (Array.isArray(it.assignedToNames)) return it.assignedToNames.filter(Boolean);
-    if (it.assignedToName) return [it.assignedToName];
-    return [];
-  }
-
-  function assignedSummary(g) {
-    const names = new Set((g.items || []).flatMap((x) => namesForItem(x)).filter(Boolean));
-    if (names.size === 0) return "Unassigned";
-    if (names.size === 1) return Array.from(names)[0];
-    return "Multiple";
-  }
-
+  // ---------- Grouping ----------
   function computeOrderIdRange(items) {
     const list = (items || [])
       .map((it) => ({
@@ -197,7 +232,6 @@ document.addEventListener("DOMContentLoaded", () => {
 
     if (!list.length) return "Order";
 
-    // Prefer numeric unique_id range when possible
     const nums = list.filter((x) => x.number !== null);
     if (nums.length) {
       const prefix = nums[0].prefix || "";
@@ -209,68 +243,99 @@ document.addEventListener("DOMContentLoaded", () => {
       if (samePrefix && prefix) return `${prefix}-${min} : ${prefix}-${max}`;
     }
 
-    // Fallback: use first/last textual ids
     const texts = list.map((x) => x.text).filter(Boolean);
     if (!texts.length) return "Order";
     if (texts.length === 1) return texts[0];
     return `${texts[0]} : ${texts[texts.length - 1]}`;
   }
 
+  function operationsSummary(items) {
+    const names = new Set(
+      (items || [])
+        .map((x) => String(x.operationsByName || "").trim())
+        .filter(Boolean),
+    );
+    if (names.size === 0) return "";
+    if (names.size === 1) return Array.from(names)[0];
+    return "Multiple";
+  }
+
   function buildGroups(items) {
     const map = new Map();
-    for (const it of items || []) {
-      const key = `${it.createdById || it.createdByName || ""}|${it.reason || ""}|${toMinuteKey(
-        it.createdTime,
-      )}`;
-      let g = map.get(key);
-      if (!g) {
-        g = {
-          key,
-          groupId: it.id,
-          reason: it.reason || "",
-          createdTime: it.createdTime,
+
+    // Sort newest first (createdTime)
+    const sorted = (Array.isArray(items) ? items.slice() : []).sort((a, b) => {
+      const da = toDate(a.createdTime)?.getTime() || 0;
+      const db = toDate(b.createdTime)?.getTime() || 0;
+      return db - da;
+    });
+
+    for (const it of sorted) {
+      const created = toDate(it.createdTime);
+      const minuteKey = created ? Math.floor(created.getTime() / 60000) : 0;
+
+      const gKey = [
+        String(it.createdById || "").trim(),
+        String(it.reason || "").trim(),
+        String(minuteKey),
+      ].join("|");
+
+      if (!map.has(gKey)) {
+        map.set(gKey, {
+          groupId: gKey,
           createdById: it.createdById || "",
           createdByName: it.createdByName || "",
+          reason: it.reason || "",
+          latestCreated: created ? created.toISOString() : "",
           items: [],
-        };
-        map.set(key, g);
+        });
       }
-      g.items.push(it);
-      if (new Date(it.createdTime) > new Date(g.createdTime)) {
-        g.createdTime = it.createdTime;
-        g.groupId = it.id;
-      }
+      map.get(gKey).items.push(it);
     }
 
-    const out = Array.from(map.values()).sort(
-      (a, b) => new Date(b.createdTime) - new Date(a.createdTime),
-    );
-
-    // compute derived fields
-    for (const g of out) {
-      g.stage = computeStage(g.items);
-      g.tab = tabFromStageIdx(g.stage.idx);
-      g.itemsCount = g.items.length;
-      g.totalQty = g.items.reduce((sum, x) => sum + (Number(x.quantity) || 0), 0);
-      g.estimateTotal = g.items.reduce(
+    const groups = Array.from(map.values()).map((g) => {
+      const itemsArr = g.items || [];
+      const totalQty = itemsArr.reduce((sum, x) => sum + (Number(x.quantity) || 0), 0);
+      const estimateTotal = itemsArr.reduce(
         (sum, x) => sum + (Number(x.quantity) || 0) * (Number(x.unitPrice) || 0),
         0,
       );
-      g.orderIdRange = computeOrderIdRange(g.items);
-      g.assignedSummary = assignedSummary(g);
-    }
+      const stage = computeStage(itemsArr);
 
-    return out;
+      return {
+        ...g,
+        orderIds: itemsArr.map((x) => x.id).filter(Boolean),
+        itemsCount: itemsArr.length,
+        totalQty,
+        estimateTotal,
+        stage,
+        orderIdRange: computeOrderIdRange(itemsArr),
+        operationsByName: operationsSummary(itemsArr),
+      };
+    });
+
+    // Newest group first
+    return groups.sort((a, b) => {
+      const da = toDate(a.latestCreated)?.getTime() || 0;
+      const db = toDate(b.latestCreated)?.getTime() || 0;
+      return db - da;
+    });
   }
+
+  // ---------- Rendering ----------
+  let allItems = [];
+  let groups = [];
+  let currentTab = "not-started";
+  let activeGroup = null;
+  let lastFocus = null;
 
   function groupMatchesQuery(g, q) {
     if (!q) return true;
     const hay = [
-      g.orderIdRange,
       g.reason,
+      g.orderIdRange,
       g.createdByName,
-      g.assignedSummary,
-      g.stage?.label,
+      g.operationsByName,
       ...(g.items || []).map((x) => x.productName),
     ]
       .filter(Boolean)
@@ -278,517 +343,381 @@ document.addEventListener("DOMContentLoaded", () => {
     return norm(hay).includes(q);
   }
 
-  // ---------------- Tabs ----------------
-  let currentTab = "not-started";
-  function readTabFromUrl() {
-    const tab = new URLSearchParams(location.search).get("tab");
-    const allowed = new Set(["not-started", "received", "delivered"]);
-    return allowed.has(tab) ? tab : "not-started";
+  function getFilteredGroups() {
+    const q = norm(searchInput?.value || "");
+    return (groups || [])
+      .filter((g) => tabFromStageIdx(g.stage?.idx || 1) === currentTab)
+      .filter((g) => groupMatchesQuery(g, q));
   }
 
-  function updateTabUI() {
-    if (!tabsWrap) return;
-    const links = Array.from(tabsWrap.querySelectorAll("a.tab-portfolio"));
-    links.forEach((a) => {
-      const t = a.getAttribute("data-tab");
-      const active = t === currentTab;
-      a.classList.toggle("active", active);
-      a.setAttribute("aria-selected", active ? "true" : "false");
+  function renderCard(g) {
+    const first = (g.items || [])[0] || {};
+    const title = escapeHTML(g.orderIdRange || g.reason || "Order");
+    const sub = escapeHTML(fmtDateOnly(g.latestCreated) || "—");
+    const createdBy = escapeHTML(String(g.createdByName || first.createdByName || "").trim() || "—");
+
+    const thumbLabel = String(g.orderIdRange || g.reason || "?").trim();
+    const thumbHTML = first.productImage
+      ? `<img src="${escapeHTML(first.productImage)}" alt="${escapeHTML(first.productName || thumbLabel)}" loading="lazy" />`
+      : `<div class="co-thumb__ph">${escapeHTML(thumbLabel.slice(0, 2).toUpperCase())}</div>`;
+
+    const stage = g.stage || computeStage(g.items || []);
+    const statusVars = notionColorVars(stage.color);
+    const statusStyle = `--tag-bg:${statusVars.bg};--tag-fg:${statusVars.fg};--tag-border:${statusVars.bd};`;
+
+    const receivedBy = String(g.operationsByName || "").trim();
+    const receivedLine = receivedBy
+      ? `<div class="co-received-by">Received by: ${escapeHTML(receivedBy)}</div>`
+      : "";
+
+    const card = document.createElement("article");
+    card.className = "co-card";
+    card.setAttribute("role", "button");
+    card.setAttribute("tabindex", "0");
+    card.dataset.groupId = g.groupId;
+
+    card.innerHTML = `
+      <div class="co-top">
+        <div class="co-thumb">${thumbHTML}</div>
+
+        <div class="co-main">
+          <div class="co-title">${title}</div>
+          <div class="co-sub">${sub}</div>
+          <div class="co-createdby">${createdBy}</div>
+        </div>
+
+        <div class="co-qty">x${Number.isFinite(Number(g.itemsCount)) ? Number(g.itemsCount) : 0}</div>
+      </div>
+
+      <div class="co-divider"></div>
+
+      <div class="co-bottom">
+        <div class="co-est">
+          <div class="co-est-label">Estimate Total</div>
+          <div class="co-est-value">${fmtMoney(g.estimateTotal)}</div>
+          ${receivedLine}
+        </div>
+
+        <div class="co-actions">
+          <span class="co-status-btn" style="${statusStyle}">${escapeHTML(stage.label)}</span>
+          <span class="co-right-ico" aria-hidden="true"><i data-feather="percent"></i></span>
+        </div>
+      </div>
+    `;
+
+    card.addEventListener("click", () => openOrderModal(g));
+    card.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        openOrderModal(g);
+      }
     });
+
+    return card;
   }
 
-  function setActiveTab(tab, opts = {}) {
-    currentTab = tab;
-    updateTabUI();
-    if (opts.updateUrl) {
-      const u = new URL(location.href);
-      u.searchParams.set("tab", tab);
-      history.replaceState({}, "", u.pathname + "?" + u.searchParams.toString());
-    }
-    filterAndRender();
-  }
-
-  // ---------------- Rendering ----------------
   function render() {
     if (!listDiv) return;
+
+    const filtered = getFilteredGroups();
     listDiv.innerHTML = "";
 
-    const q = norm(searchInput?.value || "");
-    const visible = groups
-      .filter((g) => g.tab === currentTab)
-      .filter((g) => groupMatchesQuery(g, q));
-
-    if (!visible.length) {
-      listDiv.innerHTML = `<p style="color:#6B7280;">No orders found.</p>`;
+    if (!filtered.length) {
+      listDiv.innerHTML = `<p>No orders found.</p>`;
+      if (window.feather) window.feather.replace();
       return;
     }
 
     const frag = document.createDocumentFragment();
-    for (const g of visible) {
-      const card = document.createElement("div");
-      card.className = "co-card";
-      card.tabIndex = 0;
-      card.setAttribute("role", "button");
-      card.setAttribute("aria-label", `Open order ${g.orderIdRange}`);
-      card.dataset.key = g.key;
-
-      const dateOnly = fmtDateOnly(g.createdTime);
-      const thumbSrc = g.items.find((x) => x.productImage)?.productImage || "";
-      const thumbPH = (g.orderIdRange || "OR").split(/\s+/)[0].slice(0, 2).toUpperCase();
-
-      const assignIcon = g.assignedSummary === "Unassigned" ? "user-plus" : "user-check";
-      const assignTitle =
-        g.assignedSummary === "Unassigned"
-          ? "Assign order"
-          : `Assigned: ${g.assignedSummary}`;
-
-      card.innerHTML = `
-        <div class="co-top">
-          <div class="co-thumb">
-            ${thumbSrc ? `<img src="${escapeHTML(thumbSrc)}" alt="" />` : `<div class="co-thumb__ph">${escapeHTML(thumbPH)}</div>`}
-          </div>
-          <div class="co-main">
-            <div class="co-title">${escapeHTML(g.orderIdRange)}</div>
-            <div class="co-sub">${escapeHTML(dateOnly)}</div>
-            <div class="co-price" style="font-size:34px;">${escapeHTML(g.createdByName || "-")}</div>
-          </div>
-          <div class="co-qty">x${g.itemsCount}</div>
-        </div>
-        <div class="co-divider"></div>
-        <div class="co-bottom">
-          <div>
-            <div class="co-est-label">Estimate Total</div>
-            <div class="co-est-value">${fmtMoney(g.estimateTotal)}</div>
-          </div>
-          <div class="co-actions">
-            <span class="co-status-btn">${escapeHTML(g.stage.label)}</span>
-            <button type="button" class="co-right-ico req-assign-btn" data-key="${escapeHTML(
-              g.key,
-            )}" title="${escapeHTML(assignTitle)}" aria-label="${escapeHTML(
-        assignTitle,
-      )}" style="padding:0; border:0;">
-              <i data-feather="${assignIcon}"></i>
-            </button>
-          </div>
-        </div>
-      `;
-
-      // Card interactions
-      card.addEventListener("click", () => {
-        const gg = groups.find((x) => x.key === g.key);
-        if (gg) openOrderModal(gg);
-      });
-      card.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          const gg = groups.find((x) => x.key === g.key);
-          if (gg) openOrderModal(gg);
-        }
-      });
-
-      // Assign button (stop click from opening tracking)
-      const assignBtn = card.querySelector(".req-assign-btn");
-      assignBtn?.addEventListener("click", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const gg = groups.find((x) => x.key === g.key);
-        if (!gg) return;
-        selectedGroup = { key: gg.key, orderIds: gg.items.map((x) => x.id), items: gg.items };
-        openAssignModal(gg);
-      });
-
-      frag.appendChild(card);
-    }
-
+    for (const g of filtered) frag.appendChild(renderCard(g));
     listDiv.appendChild(frag);
-    if (window.feather) feather.replace();
+
+    if (window.feather) window.feather.replace();
   }
 
-  function filterAndRender() {
-    groups = buildGroups(allItems);
-    updateTabUI();
-    render();
-  }
-
-  // ---------------- Tracking modal ----------------
+  // ---------- Modal ----------
   function openOrderModal(g) {
     if (!orderModal) return;
     activeGroup = g;
+    lastFocus = document.activeElement;
 
-    const stage = g.stage || computeStage(g.items);
-    modalTitle.textContent = stage.label;
-    modalSub.textContent = stage.sub;
-    setActiveStep(stage.idx);
+    const items = g.items || [];
+    const stage = g.stage || computeStage(items);
 
-    modalOrderId.textContent = g.orderIdRange || "—";
-    modalCreatedBy.textContent = g.createdByName || "—";
-    modalDate.textContent = fmtDateTime(g.createdTime);
-    modalAssignedTo.textContent = g.assignedSummary || "Unassigned";
-    modalComponents.textContent = String(g.itemsCount || g.items.length || 0);
-    modalTotalQty.textContent = String(g.totalQty ?? 0);
-    modalTotalPrice.textContent = fmtMoney(g.estimateTotal ?? 0);
+    // Header
+    if (modalTitle) modalTitle.textContent = stage.label || "—";
+    if (modalSub) modalSub.textContent = stage.sub || "—";
 
-    // Buttons visibility
-    // - Before shipped: show "Received by operations" (sets Status => Shipped)
-    // - When shipped: show "Received" (sets Status => Arrived/Delivered)
-    const canMarkShipped = stage.idx < 4;
-    const canMarkArrived = stage.idx === 4;
-    if (receivedBtn) receivedBtn.style.display = canMarkShipped ? "inline-flex" : "none";
-    if (receivedShippedBtn)
-      receivedShippedBtn.style.display = canMarkArrived ? "inline-flex" : "none";
+    // Tracker
+    setActiveStep(stage.idx || 1);
 
-    // Items
-    modalItems.innerHTML = "";
-    const frag = document.createDocumentFragment();
-    for (const it of g.items) {
-      const qty = Number(it.quantity) || 0;
-      const unit = Number(it.unitPrice) || 0;
-      const lineTotal = qty * unit;
-      const itemEl = document.createElement("div");
-      itemEl.className = "co-item";
-      itemEl.innerHTML = `
-        <div class="co-item-left">
-          <div class="co-item-name">${escapeHTML(it.productName || "Unknown")}</div>
-          <div class="co-item-sub">Reason: ${escapeHTML(it.reason || "-")} · Qty: ${qty} · Unit: ${fmtMoney(unit)}</div>
-        </div>
-        <div class="co-item-right">
-          <div class="co-item-total">${fmtMoney(lineTotal)}</div>
-          <div class="co-item-status">${escapeHTML(it.status || "-")}</div>
-        </div>
-      `;
-      frag.appendChild(itemEl);
+    // Meta
+    if (modalOrderId) modalOrderId.textContent = g.orderIdRange || "—";
+    if (modalCreatedBy) modalCreatedBy.textContent = g.createdByName || "—";
+    if (modalDate) modalDate.textContent = fmtDateTime(g.latestCreated) || "—";
+    if (modalOperationsBy) modalOperationsBy.textContent = g.operationsByName || "—";
+    if (modalComponents) modalComponents.textContent = String(g.itemsCount || 0);
+    if (modalTotalQty) modalTotalQty.textContent = String(g.totalQty || 0);
+    if (modalTotalPrice) modalTotalPrice.textContent = fmtMoney(g.estimateTotal);
+
+    // Actions visibility
+    if (excelBtn) excelBtn.style.display = "inline-flex";
+
+    if (shippedBtn) shippedBtn.style.display = stage.idx < 4 ? "inline-flex" : "none";
+    if (arrivedBtn) arrivedBtn.style.display = stage.idx === 4 ? "inline-flex" : "none";
+
+    // Items list
+    if (modalItems) {
+      modalItems.innerHTML = "";
+      const frag = document.createDocumentFragment();
+
+      for (const it of items) {
+        const product = escapeHTML(it.productName || "Component");
+        const reason = escapeHTML(it.reason || "");
+        const qty = Number(it.quantity) || 0;
+        const unit = Number(it.unitPrice) || 0;
+        const total = qty * unit;
+
+        const stVars = notionColorVars(it.statusColor);
+        const stStyle = `--tag-bg:${stVars.bg};--tag-fg:${stVars.fg};--tag-border:${stVars.bd};`;
+
+        const href = safeHttpUrl(it.productUrl);
+        const linkHTML = href
+          ? `<a class="co-item-link" href="${escapeHTML(href)}" target="_blank" rel="noopener" title="Open link">
+               <i data-feather="external-link"></i>
+             </a>`
+          : "";
+
+        const row = document.createElement("div");
+        row.className = "co-item";
+        row.innerHTML = `
+          <div class="co-item-left">
+            <div class="co-item-name">
+              <span>${product}</span>
+              ${linkHTML}
+            </div>
+            <div class="co-item-sub">Reason: ${reason} · Qty: ${qty} · Unit: ${fmtMoney(unit)}</div>
+          </div>
+          <div class="co-item-right">
+            <div class="co-item-total">${fmtMoney(total)}</div>
+            <div class="co-item-status" style="${stStyle}">${escapeHTML(it.status || "—")}</div>
+          </div>
+        `;
+        frag.appendChild(row);
+      }
+
+      modalItems.appendChild(frag);
     }
-    modalItems.appendChild(frag);
 
+    // Open
     orderModal.classList.add("is-open");
-    orderModal.setAttribute("aria-hidden", "false");
     document.body.classList.add("co-modal-open");
-    if (window.feather) feather.replace();
+    orderModal.setAttribute("aria-hidden", "false");
+
+    if (window.feather) window.feather.replace();
+
+    // Focus close button for accessibility
+    try {
+      modalClose?.focus();
+    } catch {}
   }
 
   function closeOrderModal() {
     if (!orderModal) return;
     orderModal.classList.remove("is-open");
-    orderModal.setAttribute("aria-hidden", "true");
     document.body.classList.remove("co-modal-open");
+    orderModal.setAttribute("aria-hidden", "true");
     activeGroup = null;
-  }
-
-  // ---------------- Excel download ----------------
-  async function downloadExcel(g) {
-    if (!g) return;
-    if (!excelBtn) return;
-    excelBtn.disabled = true;
-    const prev = excelBtn.textContent;
-    excelBtn.textContent = "Preparing...";
-    try {
-      const res = await fetch("/api/orders/requested/export/excel", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "same-origin",
-        body: JSON.stringify({ orderIds: g.items.map((x) => x.id) }),
-      });
-      if (res.status === 401) {
-        location.href = "/login";
-        return;
-      }
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || "Failed to generate Excel");
-      }
-
-      const blob = await res.blob();
-      const disp = res.headers.get("Content-Disposition") || "";
-      const m = disp.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
-      const fileName =
-        decodeURIComponent((m && (m[1] || m[2])) || "") ||
-        `order_${(g.orderIdRange || "order").replace(/\s+/g, "_")}.xlsx`;
-
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = fileName;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      window.UI?.toast?.({
-        type: "error",
-        title: "Export failed",
-        message: e.message || "Could not export Excel.",
-      });
-      alert(e.message || "Could not export Excel.");
-    } finally {
-      excelBtn.disabled = false;
-      excelBtn.textContent = prev;
-    }
-  }
-
-  // ---------------- Mark received (set status => Shipped) ----------------
-  async function markReceivedByOperations(g) {
-    if (!g) return;
-    if (!receivedBtn) return;
-    receivedBtn.disabled = true;
-    const prev = receivedBtn.textContent;
-    receivedBtn.textContent = "Updating...";
 
     try {
-      const res = await fetch("/api/orders/requested/mark-shipped", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "same-origin",
-        body: JSON.stringify({ orderIds: g.items.map((x) => x.id) }),
-      });
-      if (res.status === 401) {
-        location.href = "/login";
-        return;
-      }
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data.error) {
-        throw new Error(data.error || "Failed to update status");
-      }
-
-      const newStatus = data.status || "Shipped";
-
-      // Update local state
-      const idSet = new Set(g.items.map((x) => x.id));
-      allItems.forEach((it) => {
-        if (idSet.has(it.id)) it.status = newStatus;
-      });
-
-      // Re-render + move to Received tab
-      setActiveTab("received", { updateUrl: true });
-
-      // Update modal contents if still open
-      const updated = groups.find((x) => x.key === g.key);
-      if (updated) openOrderModal(updated);
-
-      window.UI?.toast?.({
-        type: "success",
-        title: "Updated",
-        message: "Order marked as shipped.",
-      });
-    } catch (e) {
-      window.UI?.toast?.({
-        type: "error",
-        title: "Update failed",
-        message: e.message || "Could not update order.",
-      });
-      alert(e.message || "Could not update order.");
-    } finally {
-      receivedBtn.disabled = false;
-      receivedBtn.textContent = prev;
-    }
-  }
-
-  // ---------------- Mark received (set status => Arrived/Delivered) ----------------
-  async function markReceivedAfterShipped(g) {
-    if (!g) return;
-    if (!receivedShippedBtn) return;
-    receivedShippedBtn.disabled = true;
-    const prev = receivedShippedBtn.textContent;
-    receivedShippedBtn.textContent = "Updating...";
-
-    try {
-      const res = await fetch("/api/orders/requested/mark-arrived", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "same-origin",
-        body: JSON.stringify({ orderIds: g.items.map((x) => x.id) }),
-      });
-      if (res.status === 401) {
-        location.href = "/login";
-        return;
-      }
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data.error) {
-        throw new Error(data.error || "Failed to update status");
-      }
-
-      const newStatus = data.status || "Arrived";
-      const idSet = new Set(g.items.map((x) => x.id));
-      allItems.forEach((it) => {
-        if (idSet.has(it.id)) it.status = newStatus;
-      });
-
-      // Move to Delivered tab
-      setActiveTab("delivered", { updateUrl: true });
-
-      const updated = groups.find((x) => x.key === g.key);
-      if (updated) openOrderModal(updated);
-
-      window.UI?.toast?.({
-        type: "success",
-        title: "Updated",
-        message: "Order marked as received.",
-      });
-    } catch (e) {
-      window.UI?.toast?.({
-        type: "error",
-        title: "Update failed",
-        message: e.message || "Could not update order.",
-      });
-      alert(e.message || "Could not update order.");
-    } finally {
-      receivedShippedBtn.disabled = false;
-      receivedShippedBtn.textContent = prev;
-    }
-  }
-
-  // ---------------- Assign modal ----------------
-  async function loadTeamMembers() {
-    const r = await fetch("/api/team-members", {
-      credentials: "same-origin",
-      cache: "no-store",
-    });
-    if (!r.ok) throw new Error("Failed to load team members");
-    teamMembers = await r.json();
-  }
-
-  function buildSelectOptions(group) {
-    assignSelect.innerHTML = (teamMembers || [])
-      .map((m) => `<option value="${m.id}">${escapeHTML(m.name)}</option>`)
-      .join("");
-
-    // multiple selection
-    assignSelect.multiple = true;
-    assignSelect.size = Math.min(6, teamMembers.length || 6);
-
-    // preselect if all items share the same assignment
-    const names = new Set((group.items || []).flatMap((i) => namesForItem(i)).filter(Boolean));
-    if (names.size === 1) {
-      const name = Array.from(names)[0];
-      const m = teamMembers.find((x) => x.name === name);
-      if (m) {
-        Array.from(assignSelect.options).forEach((o) => {
-          o.selected = o.value === m.id;
-        });
-      }
-    }
-  }
-
-  function enhanceSelect() {
-    try {
-      if (choiceInst && typeof choiceInst.destroy === "function") {
-        choiceInst.destroy();
-        choiceInst = null;
-      }
-      if (window.Choices) {
-        choiceInst = new Choices(assignSelect, {
-          removeItemButton: true,
-          shouldSort: false,
-          itemSelectText: "",
-          searchEnabled: true,
-          placeholder: false,
-          duplicateItemsAllowed: false,
-        });
-      }
+      if (lastFocus && typeof lastFocus.focus === "function") lastFocus.focus();
     } catch {}
   }
 
-  function getSelectedMemberIds() {
-    return Array.from(assignSelect?.selectedOptions || [])
-      .map((o) => o.value)
-      .filter(Boolean);
+  // ---------- Actions ----------
+  async function downloadExcel(g) {
+  if (!g || !g.orderIds || !g.orderIds.length) return;
+
+  if (excelBtn) {
+    excelBtn.disabled = true;
+    excelBtn.dataset.prevText = excelBtn.textContent || "";
+    excelBtn.textContent = "Preparing...";
   }
 
-  function openAssignModal(group) {
-    if (!assignModal) return;
-    buildSelectOptions(group);
-    enhanceSelect();
-    assignModal.style.display = "flex";
-    if (window.feather) feather.replace();
-  }
+  try {
+    const res = await fetch("/api/orders/requested/export/excel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ orderIds: g.orderIds }),
+    });
 
-  function closeAssignModal() {
-    if (!assignModal) return;
-    assignModal.style.display = "none";
-  }
-
-  async function applyAssign(e) {
-    e?.preventDefault?.();
-    const memberIds = getSelectedMemberIds();
-    if (!selectedGroup || !Array.isArray(selectedGroup.orderIds) || !selectedGroup.orderIds.length) {
-      alert("No order selected.");
-      return;
-    }
-    if (!memberIds.length) {
-      alert("Please choose at least one member.");
+    if (res.status === 401) {
+      window.location.href = "/login";
       return;
     }
 
-    assignApply.disabled = true;
-    const prev = assignApply.textContent;
-    assignApply.textContent = "Assigning...";
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || "Failed to export Excel");
+    }
+
+    const blob = await res.blob();
+
+    // Try to extract filename from content-disposition
+    const cd = res.headers.get("content-disposition") || "";
+    const m = cd.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
+    const filename = decodeURIComponent((m && (m[1] || m[2])) || "operations_orders.xlsx");
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    toast("success", "Downloaded", "Excel exported successfully.");
+  } catch (e) {
+    console.error(e);
+    alert(e.message || "Failed to export Excel");
+  } finally {
+    if (excelBtn) {
+      excelBtn.disabled = false;
+      excelBtn.textContent = excelBtn.dataset.prevText || "Download Excel";
+    }
+  }
+}
+
+async function postJson(url, body) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify(body || {}),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) {
+      throw new Error(data.error || "Request failed");
+    }
+    return data;
+  }
+
+  async function markReceivedByOperations(g) {
+    if (!g || !g.orderIds?.length) return;
+
+    if (shippedBtn) {
+      shippedBtn.disabled = true;
+      shippedBtn.dataset.prevText = shippedBtn.textContent || "";
+      shippedBtn.textContent = "Receiving...";
+    }
 
     try {
-      const res = await fetch("/api/orders/assign", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "same-origin",
-        body: JSON.stringify({ orderIds: selectedGroup.orderIds, memberIds }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data.error) throw new Error(data.error || "Failed to assign");
+      const data = await postJson("/api/orders/requested/mark-shipped", { orderIds: g.orderIds });
 
-      // Update local state
-      const chosenList = (teamMembers || []).filter((m) => memberIds.includes(m.id));
-      const names = chosenList.map((m) => m.name);
-      const ids = chosenList.map((m) => m.id);
+      // Update local state (set status = Shipped + operationsByName)
+      const username = String(data.operationsByName || localStorage.getItem("username") || "").trim();
+      const idSet = new Set(g.orderIds);
 
-      const idSet = new Set(selectedGroup.orderIds);
       allItems.forEach((it) => {
         if (!idSet.has(it.id)) return;
-        it.assignedToIds = ids.slice();
-        it.assignedToNames = names.slice();
-        it.assignedToId = ids[0] || "";
-        it.assignedToName = names[0] || "";
+        it.status = "Shipped";
+        it.statusColor = data.statusColor || it.statusColor;
+        if (username) it.operationsByName = username;
       });
 
-      filterAndRender();
-      window.UI?.toast?.({
-        type: "success",
-        title: "Assigned",
-        message: "Order assigned successfully.",
-      });
-      closeAssignModal();
-    } catch (e2) {
-      alert(e2.message || "Failed to assign.");
-    } finally {
-      assignApply.disabled = false;
-      assignApply.textContent = prev;
-    }
-  }
-
-  // ---------------- Load data ----------------
-  async function loadRequested() {
-    try {
-      const r = await fetch("/api/orders/requested", {
-        credentials: "same-origin",
-        cache: "no-store",
-      });
-      if (r.status === 401) {
-        location.href = "/login";
-        return;
-      }
-      if (!r.ok) throw new Error("Failed to fetch requested orders");
-      const data = await r.json();
-      allItems = Array.isArray(data) ? data : [];
       groups = buildGroups(allItems);
       render();
+
+      // Keep modal open and refreshed
+      const updated = groups.find((x) => x.groupId === g.groupId);
+      if (updated && orderModal?.classList.contains("is-open")) {
+        openOrderModal(updated);
+      }
+
+      toast("success", "Received", "Marked as received by operations.");
     } catch (e) {
       console.error(e);
-      if (listDiv) {
-        listDiv.innerHTML = `<p style="color:#B91C1C;">Error: ${escapeHTML(e.message || "Failed to load")}</p>`;
-      }
+      alert(e.message || "Failed to mark as received.");
     } finally {
-      if (window.feather) feather.replace();
+      if (shippedBtn) {
+        shippedBtn.disabled = false;
+        shippedBtn.textContent = shippedBtn.dataset.prevText || "Received by operations";
+      }
     }
   }
 
-  // ---------------- Events ----------------
-  searchInput?.addEventListener("input", () => render());
+  async function markArrived(g) {
+    if (!g || !g.orderIds?.length) return;
+
+    if (arrivedBtn) {
+      arrivedBtn.disabled = true;
+      arrivedBtn.dataset.prevText = arrivedBtn.textContent || "";
+      arrivedBtn.textContent = "Marking...";
+    }
+
+    try {
+      const data = await postJson("/api/orders/requested/mark-arrived", { orderIds: g.orderIds });
+
+      const idSet = new Set(g.orderIds);
+      allItems.forEach((it) => {
+        if (!idSet.has(it.id)) return;
+        it.status = "Arrived";
+        it.statusColor = data.statusColor || it.statusColor;
+      });
+
+      groups = buildGroups(allItems);
+      render();
+
+      const updated = groups.find((x) => x.groupId === g.groupId);
+      if (updated && orderModal?.classList.contains("is-open")) {
+        openOrderModal(updated);
+      }
+
+      toast("success", "Delivered", "Marked as delivered.");
+    } catch (e) {
+      console.error(e);
+      alert(e.message || "Failed to mark as delivered.");
+    } finally {
+      if (arrivedBtn) {
+        arrivedBtn.disabled = false;
+        arrivedBtn.textContent = arrivedBtn.dataset.prevText || "Received";
+      }
+    }
+  }
+
+  // ---------- Load data ----------
+  async function loadRequested() {
+    if (listDiv) {
+      listDiv.innerHTML =
+        '<p><i class="loading-icon" data-feather="loader"></i> Loading requested orders...</p>';
+      if (window.feather) window.feather.replace();
+    }
+
+    const res = await fetch("/api/orders/requested", {
+      credentials: "same-origin",
+      cache: "no-store",
+    });
+
+    if (res.status === 401) {
+      window.location.href = "/login";
+      return;
+    }
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || "Failed to fetch requested orders");
+    }
+
+    const data = await res.json().catch(() => []);
+    allItems = Array.isArray(data) ? data : [];
+    groups = buildGroups(allItems);
+    render();
+  }
+
+  // ---------- Events ----------
+  searchInput?.addEventListener("input", render);
   searchInput?.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       searchInput.value = "";
@@ -796,18 +725,17 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // Tabs click (keep navigation as-is, but also update UI in case of SPA behavior)
   tabsWrap?.addEventListener("click", (e) => {
     const a = e.target?.closest?.("a.tab-portfolio");
     if (!a) return;
-    const t = a.getAttribute("data-tab");
+    const t = norm(a.getAttribute("data-tab"));
     if (t) {
       currentTab = t;
       updateTabUI();
+      render();
     }
   });
 
-  // Tracking modal close
   modalClose?.addEventListener("click", closeOrderModal);
   orderModal?.addEventListener("click", (e) => {
     if (e.target === orderModal) closeOrderModal();
@@ -817,32 +745,15 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   excelBtn?.addEventListener("click", () => downloadExcel(activeGroup));
-  receivedBtn?.addEventListener("click", () => markReceivedByOperations(activeGroup));
-  receivedShippedBtn?.addEventListener("click", () => {
-    markReceivedAfterShipped(activeGroup);
-  });
+  shippedBtn?.addEventListener("click", () => markReceivedByOperations(activeGroup));
+  arrivedBtn?.addEventListener("click", () => markArrived(activeGroup));
 
-  // Assign modal events
-  assignClose?.addEventListener("click", closeAssignModal);
-  assignCancel?.addEventListener("click", (e) => {
-    e.preventDefault();
-    closeAssignModal();
-  });
-  assignModal?.addEventListener("click", (e) => {
-    if (e.target === assignModal) closeAssignModal();
-  });
-  assignApply?.addEventListener("click", applyAssign);
-
-  // ---------------- Init ----------------
+  // ---------- Init ----------
   currentTab = readTabFromUrl();
   updateTabUI();
 
-  (async () => {
-    try {
-      await loadTeamMembers();
-    } catch (e) {
-      console.warn(e);
-    }
-    await loadRequested();
-  })();
+  loadRequested().catch((e) => {
+    console.error(e);
+    if (listDiv) listDiv.innerHTML = `<p style="color:#B91C1C;">${escapeHTML(e.message || "Failed to load")}</p>`;
+  });
 });

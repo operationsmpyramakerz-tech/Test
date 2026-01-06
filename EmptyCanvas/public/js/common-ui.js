@@ -399,6 +399,18 @@ if (document.querySelector('.sidebar')) {
     if (window.feather) feather.replace();
   }
 
+
+  // Rename sidebar labels (display-only) without changing routes
+  function renameSidebarLabels(){
+    // Operations Orders (was: Operations Requested Orders)
+    document
+      .querySelectorAll('a.nav-item[href^="/orders/requested"], a.nav-link[href^="/orders/requested"]')
+      .forEach((a) => {
+        const lbl = a.querySelector('.nav-label');
+        if (lbl) lbl.textContent = 'Operations Orders';
+      });
+  }
+
   async function ensureGreetingAndPages(){
     const cached = getCachedName();
     if (cached) {
