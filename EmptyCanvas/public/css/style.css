@@ -869,6 +869,71 @@ body.co-modal-open{ overflow: hidden; }
   border: 1px solid var(--tag-border, transparent);
 }
 
+/* =================================
+   Requested Orders (Operations) — Modal tweaks
+   ================================= */
+
+/* Actions buttons (Download Excel / PDF / Received by operations) */
+.ro-actions{
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.ro-action-btn{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: .78rem 1.1rem;
+  border-radius: 14px;
+  border: 1px solid rgba(234, 88, 12, 0.22);
+  background: linear-gradient(180deg, #FB923C 0%, #EA580C 100%);
+  color: #fff;
+  font-weight: 900;
+  letter-spacing: .2px;
+  box-shadow: 0 14px 28px rgba(234, 88, 12, 0.22);
+  cursor: pointer;
+  transition: transform .12s ease, box-shadow .12s ease, filter .12s ease;
+}
+
+.ro-action-btn:hover{
+  transform: translateY(-1px);
+  box-shadow: 0 18px 36px rgba(234, 88, 12, 0.28);
+  filter: brightness(1.02);
+}
+
+.ro-action-btn:active{
+  transform: translateY(0);
+  box-shadow: 0 12px 24px rgba(234, 88, 12, 0.22);
+}
+
+.ro-action-btn:disabled{
+  opacity: .65;
+  cursor: not-allowed;
+  filter: saturate(.8);
+  box-shadow: none;
+}
+
+.ro-action-btn svg{ width: 18px; height: 18px; }
+
+/* Put the Edit button next to the status pill (same row) */
+.co-item-right-row{
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 6px;
+}
+.co-item-right-row .co-item-status{ margin-top: 0; }
+.ro-edit-inline{ white-space: nowrap; }
+
+@media (max-width: 560px){
+  .ro-action-btn{ flex: 1; }
+}
+
 @media (max-width: 560px){
   .co-modal-status{ font-size: 34px; }
   .co-modal-meta{ grid-template-columns: 1fr; }
