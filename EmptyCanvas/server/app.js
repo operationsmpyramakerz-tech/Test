@@ -1008,12 +1008,20 @@ app.get(
             statusProp?.select?.color || statusProp?.status?.color || "default";
 
           const qtyRequested = page.properties?.["Quantity Requested"]?.number || 0;
-          const qtyReceived =
+          const qtyReceivedRaw =
             receivedProp && page.properties?.[receivedProp]
               ? page.properties?.[receivedProp]?.number
               : null;
+          const qtyReceived =
+            typeof qtyReceivedRaw === "number" && Number.isFinite(qtyReceivedRaw)
+              ? qtyReceivedRaw
+              : null;
+
+          // Quantity shown in the Current Orders UI:
+          // - If Operations entered a value in "Quantity Received by operations", we display it.
+          // - Otherwise we display the requested quantity.
           const qtyForUI =
-            qtyReceived !== null && qtyReceived !== undefined && Number.isFinite(Number(qtyReceived))
+            qtyReceived !== null && qtyReceived !== undefined
               ? Number(qtyReceived)
               : Number(qtyRequested) || 0;
 
@@ -1030,6 +1038,8 @@ app.get(
             productUrl,
             unitPrice,
             quantity: qtyForUI,
+            quantityRequested: Number(qtyRequested) || 0,
+            quantityReceived: qtyReceived,
             status: statusName,
             statusColor,
             createdById,
@@ -1592,7 +1602,11 @@ const qty = Number.isFinite(Number(qtyProgress))
   : Number(qtyRequested) || 0;
 
 const qtyReceivedRaw = receivedQtyPropName ? parseNumberProp(props[receivedQtyPropName]) : null;
-const qtyReceived = Number.isFinite(Number(qtyReceivedRaw)) ? Number(qtyReceivedRaw) : null;
+// IMPORTANT: keep "empty" as null (Notion number can be null). Don't coerce null -> 0.
+const qtyReceived =
+  typeof qtyReceivedRaw === "number" && Number.isFinite(qtyReceivedRaw)
+    ? qtyReceivedRaw
+    : null;
 
 // Status + Notion label color
 const statusPropObj = getPropInsensitive(props, "Status") || props["Status"];
