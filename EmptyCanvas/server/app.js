@@ -884,6 +884,12 @@ app.get(
         }
       };
 
+      const receivedProp = (await (async () => {
+        const props = await getOrdersDBProps();
+        if (props[REC_PROP_HARDBIND] && props[REC_PROP_HARDBIND].type === "number") return REC_PROP_HARDBIND;
+        return await detectReceivedQtyPropName();
+      })());
+
       while (hasMore) {
         const response = await notion.databases.query({
           database_id: ordersDatabaseId,
@@ -1001,6 +1007,16 @@ app.get(
           const statusColor =
             statusProp?.select?.color || statusProp?.status?.color || "default";
 
+          const qtyRequested = page.properties?.["Quantity Requested"]?.number || 0;
+          const qtyReceived =
+            receivedProp && page.properties?.[receivedProp]
+              ? page.properties?.[receivedProp]?.number
+              : null;
+          const qtyForUI =
+            qtyReceived !== null && qtyReceived !== undefined && Number.isFinite(Number(qtyReceived))
+              ? Number(qtyReceived)
+              : Number(qtyRequested) || 0;
+
           allOrders.push({
             id: page.id,
             // Human-readable order identifier from Notion "ID" (unique_id)
@@ -1013,7 +1029,7 @@ app.get(
             productImage,
             productUrl,
             unitPrice,
-            quantity: page.properties?.["Quantity Requested"]?.number || 0,
+            quantity: qtyForUI,
             status: statusName,
             statusColor,
             createdById,
@@ -1535,6 +1551,8 @@ app.get(
         }
       }
 
+      const receivedQtyPropName = await detectReceivedQtyPropName();
+
       while (hasMore) {
         const resp = await notion.databases.query({
           database_id: ordersDatabaseId,
@@ -1572,6 +1590,9 @@ const qtyRequested =
 const qty = Number.isFinite(Number(qtyProgress))
   ? Number(qtyProgress)
   : Number(qtyRequested) || 0;
+
+const qtyReceivedRaw = receivedQtyPropName ? parseNumberProp(props[receivedQtyPropName]) : null;
+const qtyReceived = Number.isFinite(Number(qtyReceivedRaw)) ? Number(qtyReceivedRaw) : null;
 
 // Status + Notion label color
 const statusPropObj = getPropInsensitive(props, "Status") || props["Status"];
@@ -1621,7 +1642,13 @@ if (svApproval !== "Approved") continue;
           }
 
           // Operations (who clicked "Received by operations")
-          const opsProp = getPropInsensitive(props, "Operations") || props["Operations"];
+          const opsProp =
+            getPropInsensitive(props, "Person Received by Operations") ||
+            getPropInsensitive(props, "Received by operations") ||
+            getPropInsensitive(props, "Operations") ||
+            props["Person Received by Operations"] ||
+            props["Received by operations"] ||
+            props["Operations"];
           let operationsByIds = [];
           let operationsByNames = [];
           let operationsById = "";
@@ -1664,6 +1691,7 @@ if (svApproval !== "Approved") continue;
     productImage,
     unitPrice,
     quantity: qty,
+    quantityReceived: qtyReceived,
     status,
     statusColor,
     operationsByIds,
@@ -1797,15 +1825,26 @@ app.post(
 
             const currentUserPageId = await getCurrentUserRelationPage(req);
 
-      // Also store who received the order in the "Operations" property (if present)
+      // Store who clicked "Received by operations" in the proper Notion column (Relation),
+      // prefer "Person Received by Operations", fallback to "Operations" for older setups.
       let operationsProp = null;
       let operationsMeta = null;
-      for (const [key, meta] of Object.entries(dbProps || {})) {
-        if (normKey(key) === normKey("Operations")) {
-          operationsProp = key;
-          operationsMeta = meta;
-          break;
+
+      const opsCandidates = [
+        "Person Received by Operations",
+        "Received by operations",
+        "Operations",
+      ];
+
+      for (const cand of opsCandidates) {
+        for (const [key, meta] of Object.entries(dbProps || {})) {
+          if (normKey(key) === normKey(cand)) {
+            operationsProp = key;
+            operationsMeta = meta;
+            break;
+          }
         }
+        if (operationsProp) break;
       }
 
       const shippedOpt = (opts || []).find((o) => norm(o?.name) === norm(shippedName));
@@ -1922,6 +1961,419 @@ app.post(
   },
 );
 
+// Update "Quantity Received by operations" for a single order item (Operations edit Qty)
+// Body: { value: number }
+app.post(
+  "/api/orders/requested/:id/received-quantity",
+  requireAuth,
+  requirePage("Requested Orders"),
+  async (req, res) => {
+    try {
+      const rawId = String(req.params.id || "").trim();
+      const id = looksLikeNotionId(rawId) ? toHyphenatedUUID(rawId) : rawId;
+      const { value } = req.body || {};
+
+      const vNum = Number(value);
+      if (!Number.isFinite(vNum) || vNum < 0) {
+        return res.status(400).json({ error: "value must be a non-negative number" });
+      }
+
+      // Detect received quantity property name (Number)
+      const receivedProp = (await (async () => {
+        const props = await getOrdersDBProps();
+        if (props[REC_PROP_HARDBIND] && props[REC_PROP_HARDBIND].type === "number") return REC_PROP_HARDBIND;
+        return await detectReceivedQtyPropName();
+      })());
+
+      if (!receivedProp) {
+        return res.status(500).json({ error: 'Received-quantity column not found (expected: "Quantity Received by operations")' });
+      }
+
+      await notion.pages.update({
+        page_id: id,
+        properties: {
+          [receivedProp]: { number: vNum },
+        },
+      });
+
+      return res.json({ success: true, value: vNum });
+    } catch (e) {
+      console.error("received-quantity update error:", e.body || e);
+      return res.status(500).json({ error: "Failed to update received quantity" });
+    }
+  },
+);
+
+
+// Export requested order to PDF (Delivery receipt)
+// Body: { orderIds: [notionPageId, ...] }
+app.post(
+  "/api/orders/requested/export/pdf",
+  requireAuth,
+  requirePage("Requested Orders"),
+  async (req, res) => {
+    try {
+      const { orderIds } = req.body || {};
+      if (!Array.isArray(orderIds) || orderIds.length === 0) {
+        return res.status(400).json({ error: "orderIds required" });
+      }
+
+      const ids = orderIds
+        .map((x) => String(x || "").trim())
+        .filter(Boolean)
+        .map((x) => (looksLikeNotionId(x) ? toHyphenatedUUID(x) : x));
+
+      if (!ids.length) return res.status(400).json({ error: "orderIds required" });
+
+      const parseNumberProp = (prop) => {
+        if (!prop) return null;
+        try {
+          if (prop.type === "number") return prop.number ?? null;
+          if (prop.type === "formula") {
+            if (prop.formula?.type === "number") return prop.formula.number ?? null;
+            if (prop.formula?.type === "string") {
+              const n = parseFloat(String(prop.formula.string || "").replace(/[^0-9.]/g, ""));
+              return Number.isFinite(n) ? n : null;
+            }
+          }
+          if (prop.type === "rollup") {
+            if (prop.rollup?.type === "number") return prop.rollup.number ?? null;
+            if (prop.rollup?.type === "array") {
+              const arr = prop.rollup.array || [];
+              for (const x of arr) {
+                if (x.type === "number" && typeof x.number === "number") return x.number;
+                if (x.type === "formula" && x.formula?.type === "number") return x.formula.number;
+                if (x.type === "formula" && x.formula?.type === "string") {
+                  const n = parseFloat(String(x.formula.string || "").replace(/[^0-9.]/g, ""));
+                  if (Number.isFinite(n)) return n;
+                }
+              }
+            }
+          }
+          if (prop.type === "rich_text") {
+            const t = (prop.rich_text || []).map((r) => r.plain_text).join("").trim();
+            const n = parseFloat(t.replace(/[^0-9.]/g, ""));
+            return Number.isFinite(n) ? n : null;
+          }
+        } catch {}
+        return null;
+      };
+
+      const getPropInsensitive = (props, name) => {
+        if (!props || !name) return null;
+        const target = String(name).trim().toLowerCase();
+        for (const [k, v] of Object.entries(props)) {
+          if (String(k).trim().toLowerCase() === target) return v;
+        }
+        return null;
+      };
+
+      const extractUniqueIdDetails = (prop) => {
+        try {
+          if (!prop) return { text: null, prefix: null, number: null };
+          if (prop.type === "unique_id") {
+            const u = prop.unique_id;
+            if (!u || typeof u.number !== "number") return { text: null, prefix: null, number: null };
+            const prefix = u.prefix ? String(u.prefix).trim() : "";
+            const number = u.number;
+            const text = prefix ? `${prefix}-${number}` : String(number);
+            return { text, prefix: prefix || null, number };
+          }
+        } catch {}
+        return { text: null, prefix: null, number: null };
+      };
+
+      const getOrderUniqueIdDetails = (props) => {
+        const direct = getPropInsensitive(props, "ID");
+        const d = extractUniqueIdDetails(direct);
+        if (d.text) return d;
+        for (const v of Object.values(props || {})) {
+          if (v?.type === "unique_id") {
+            const x = extractUniqueIdDetails(v);
+            if (x.text) return x;
+          }
+        }
+        return { text: null, prefix: null, number: null };
+      };
+
+      const computeOrderIdRange = (uids) => {
+        const nums = uids.filter((u) => typeof u.number === "number");
+        if (nums.length) {
+          const prefix = nums[0].prefix || "";
+          const samePrefix = nums.every((x) => (x.prefix || "") === prefix);
+          const min = Math.min(...nums.map((x) => x.number));
+          const max = Math.max(...nums.map((x) => x.number));
+          if (min === max) return prefix ? `${prefix}-${min}` : String(min);
+          if (samePrefix && prefix) return `${prefix}-${min} : ${prefix}-${max}`;
+        }
+        const texts = uids.map((u) => u.text).filter(Boolean);
+        if (!texts.length) return "Order";
+        if (texts.length === 1) return texts[0];
+        return `${texts[0]} : ${texts[texts.length - 1]}`;
+      };
+
+      const money = (n) => {
+        const num = Number(n) || 0;
+        return `£${num.toFixed(2)}`;
+      };
+
+      // Detect received quantity property name (Number)
+      const receivedProp = (await (async () => {
+        const props = await getOrdersDBProps();
+        if (props[REC_PROP_HARDBIND] && props[REC_PROP_HARDBIND].type === "number") return REC_PROP_HARDBIND;
+        return await detectReceivedQtyPropName();
+      })());
+
+      // Load pages
+      const pages = (await Promise.all(
+        ids.map(async (id) => {
+          try {
+            return await notion.pages.retrieve({ page_id: id });
+          } catch {
+            return null;
+          }
+        }),
+      )).filter(Boolean);
+
+      if (!pages.length) return res.status(404).json({ error: "Orders not found" });
+
+      // Member name cache
+      const nameCache = new Map();
+      async function memberName(id) {
+        if (!id) return "";
+        if (nameCache.has(id)) return nameCache.get(id);
+        try {
+          const p = await notion.pages.retrieve({ page_id: id });
+          const nm = p.properties?.Name?.title?.[0]?.plain_text || "";
+          nameCache.set(id, nm);
+          return nm;
+        } catch {
+          return "";
+        }
+      }
+
+      // Product cache
+      const productCache = new Map();
+      async function productInfo(productPageId) {
+        if (!productPageId) return { name: "Unknown", unitPrice: null, url: null };
+        if (productCache.has(productPageId)) return productCache.get(productPageId);
+        try {
+          const p = await notion.pages.retrieve({ page_id: productPageId });
+          const name = p.properties?.Name?.title?.[0]?.plain_text || "Unknown";
+          const unitPrice =
+            parseNumberProp(p.properties?.["Unity Price"]) ??
+            parseNumberProp(p.properties?.["Unit price"]) ??
+            parseNumberProp(p.properties?.["Unit Price"]) ??
+            parseNumberProp(p.properties?.["Price"]) ??
+            null;
+          let url = null;
+          try {
+            const urlProp =
+              getPropInsensitive(p.properties, "URL") ||
+              getPropInsensitive(p.properties, "Url") ||
+              getPropInsensitive(p.properties, "Link") ||
+              getPropInsensitive(p.properties, "Website");
+
+            if (urlProp?.type === "url") url = urlProp.url || null;
+            if (!url && urlProp?.type === "rich_text") {
+              const t = (urlProp.rich_text || []).map((x) => x?.plain_text || "").join("").trim();
+              url = t || null;
+            }
+          } catch {}
+          if (!url) url = p.url || null;
+          const info = { name, unitPrice, url };
+          productCache.set(productPageId, info);
+          return info;
+        } catch {
+          const info = { name: "Unknown", unitPrice: null, url: null };
+          productCache.set(productPageId, info);
+          return info;
+        }
+      }
+
+      // Header info
+      const createdTimes = pages.map((p) => new Date(p.created_time));
+      const createdAt = new Date(Math.min(...createdTimes.map((d) => d.getTime())));
+
+      // Team member (from first page relation)
+      let teamMember = "";
+      const firstProps = pages[0].properties || {};
+      const teamRel = firstProps["Teams Members"]?.relation;
+      if (Array.isArray(teamRel) && teamRel.length) {
+        teamMember = await memberName(teamRel[0].id);
+      }
+
+      const uids = pages.map((p) => getOrderUniqueIdDetails(p.properties || {}));
+      const orderIdRange = computeOrderIdRange(uids);
+
+      // Build rows
+      const rows = [];
+      let grandTotal = 0;
+      let grandQty = 0;
+
+      for (const p of pages) {
+        const props = p.properties || {};
+        const reason = props.Reason?.title?.[0]?.plain_text || "";
+
+        // Base qty: "Quantity Progress" (fallback to "Quantity Requested")
+        const qtyProgressProp = props["Quantity Progress"] || props["Quantity progress"];
+        const qtyProgress =
+          qtyProgressProp?.number ??
+          qtyProgressProp?.formula?.number ??
+          qtyProgressProp?.rollup?.number ??
+          null;
+
+        const qtyRequested = props["Quantity Requested"]?.number || 0;
+        const baseQty =
+          qtyProgress !== null && qtyProgress !== undefined ? qtyProgress : qtyRequested;
+
+        // Received qty (Operations override)
+        const recQtyRaw = receivedProp ? parseNumberProp(props[receivedProp]) : null;
+        const qty = Number.isFinite(Number(recQtyRaw)) ? Number(recQtyRaw) : Number(baseQty) || 0;
+
+        const productRel = props.Product?.relation;
+        const productPageId =
+          Array.isArray(productRel) && productRel.length ? productRel[0].id : null;
+
+        const prod = await productInfo(productPageId);
+        const unit = Number(prod.unitPrice) || 0;
+        const total = (Number(qty) || 0) * unit;
+
+        grandTotal += total;
+        grandQty += Number(qty) || 0;
+
+        rows.push({
+          component: prod.name,
+          qty,
+          reason,
+          link: prod.url,
+          unit,
+          total,
+        });
+      }
+
+      const safeName = String(orderIdRange || "order")
+        .replace(/[\\/:*?"<>|]/g, "-")
+        .replace(/\s+/g, "_")
+        .slice(0, 60);
+
+      const fileName = `delivery_receipt_${safeName}.pdf`;
+
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${fileName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+      );
+      res.setHeader("Cache-Control", "no-store");
+
+      const doc = new PDFDocument({ size: "A4", margin: 36 });
+      doc.pipe(res);
+
+      // Title
+      doc.fontSize(20).text("Delivery Receipt", { align: "center" });
+      doc.moveDown(0.3);
+      doc.fontSize(10).text("Operations Hub", { align: "center" });
+      doc.moveDown(1);
+
+      // Meta
+      doc.fontSize(11);
+      doc.text(`Order ID: ${orderIdRange}`);
+      doc.text(`Date: ${createdAt.toLocaleString("en-US")}`);
+      doc.text(`Team member: ${teamMember || "—"}`);
+      doc.text(`Prepared by (Operations): ${req.session.username || "—"}`);
+      doc.moveDown(0.8);
+
+      // Table layout
+      const pageW = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+      const col1 = doc.page.margins.left;
+      const wComponent = pageW * 0.34;
+      const wReason = pageW * 0.28;
+      const wQty = pageW * 0.10;
+      const wUnit = pageW * 0.14;
+      const wTotal = pageW * 0.14;
+
+      const xComponent = col1;
+      const xReason = xComponent + wComponent;
+      const xQty = xReason + wReason;
+      const xUnit = xQty + wQty;
+      const xTotal = xUnit + wUnit;
+
+      const drawHeader = () => {
+        doc.fontSize(11).font("Helvetica-Bold");
+        const y = doc.y;
+        doc.text("Component", xComponent, y, { width: wComponent - 6 });
+        doc.text("Reason", xReason, y, { width: wReason - 6 });
+        doc.text("Qty", xQty, y, { width: wQty - 6, align: "right" });
+        doc.text("Unit", xUnit, y, { width: wUnit - 6, align: "right" });
+        doc.text("Total", xTotal, y, { width: wTotal - 6, align: "right" });
+        doc.moveDown(0.4);
+        doc.font("Helvetica").fontSize(10);
+        doc.moveTo(doc.page.margins.left, doc.y).lineTo(doc.page.width - doc.page.margins.right, doc.y).strokeColor("#dddddd").stroke();
+        doc.moveDown(0.2);
+      };
+
+      const ensureSpace = (h) => {
+        const bottom = doc.page.height - doc.page.margins.bottom;
+        if (doc.y + h > bottom) {
+          doc.addPage();
+          drawHeader();
+        }
+      };
+
+      drawHeader();
+
+      for (const r of rows) {
+        const compText = String(r.component || "");
+        const reasonText = String(r.reason || "");
+        const qtyText = String(Number(r.qty) || 0);
+        const unitText = money(r.unit);
+        const totalText = money(r.total);
+
+        const h1 = doc.heightOfString(compText, { width: wComponent - 6 });
+        const h2 = doc.heightOfString(reasonText, { width: wReason - 6 });
+        const rowH = Math.max(h1, h2, 12) + 6;
+
+        ensureSpace(rowH + 4);
+
+        const y = doc.y;
+        doc.text(compText, xComponent, y, { width: wComponent - 6 });
+        doc.text(reasonText, xReason, y, { width: wReason - 6 });
+        doc.text(qtyText, xQty, y, { width: wQty - 6, align: "right" });
+        doc.text(unitText, xUnit, y, { width: wUnit - 6, align: "right" });
+        doc.text(totalText, xTotal, y, { width: wTotal - 6, align: "right" });
+
+        doc.y = y + rowH;
+        doc.moveTo(doc.page.margins.left, doc.y).lineTo(doc.page.width - doc.page.margins.right, doc.y).strokeColor("#f0f0f0").stroke();
+        doc.moveDown(0.2);
+      }
+
+      doc.moveDown(0.6);
+      doc.font("Helvetica-Bold").fontSize(11);
+      doc.text(`Total quantity: ${grandQty}`, { align: "right" });
+      doc.text(`Grand total: ${money(grandTotal)}`, { align: "right" });
+      doc.font("Helvetica").fontSize(10);
+      doc.moveDown(1.2);
+
+      // Signatures
+      doc.fontSize(11).font("Helvetica-Bold").text("Handover confirmation", { underline: true });
+      doc.font("Helvetica").fontSize(11).moveDown(0.6);
+
+      doc.text("Delivered to (Name): ________________________________");
+      doc.text("Signature: ____________________    Date: ____ / ____ / ______");
+      doc.moveDown(0.8);
+      doc.text("Operations (Name): ________________________________");
+      doc.text("Signature: ____________________    Date: ____ / ____ / ______");
+
+      doc.end();
+    } catch (e) {
+      console.error("export requested pdf error:", e.body || e);
+      try {
+        if (!res.headersSent) res.status(500).json({ error: "Failed to export PDF" });
+      } catch {}
+    }
+  },
+);
+
 // Export requested order to Excel
 // Body: { orderIds: [notionPageId, ...] }
 app.post(
@@ -2030,6 +2482,13 @@ app.post(
         return `${texts[0]} : ${texts[texts.length - 1]}`;
       };
 
+      // Received Quantity property (Number) — if filled, use it instead of base quantity
+      const receivedProp = (await (async () => {
+        const props = await getOrdersDBProps();
+        if (props[REC_PROP_HARDBIND] && props[REC_PROP_HARDBIND].type === "number") return REC_PROP_HARDBIND;
+        return await detectReceivedQtyPropName();
+      })());
+
       // Load pages
       const pages = (await Promise.all(
         ids.map(async (id) => {
@@ -2130,8 +2589,12 @@ app.post(
           qtyProgressProp?.rollup?.number ??
           null;
         const qtyRequested = props["Quantity Requested"]?.number || 0;
-        const qty =
+        const baseQty =
           qtyProgress !== null && qtyProgress !== undefined ? qtyProgress : qtyRequested;
+
+        // Use received quantity if Operations already set it
+        const recQtyRaw = receivedProp ? parseNumberProp(props[receivedProp]) : null;
+        const qty = Number.isFinite(Number(recQtyRaw)) ? Number(recQtyRaw) : Number(baseQty) || 0;
         const productRel = props.Product?.relation;
         const productPageId =
           Array.isArray(productRel) && productRel.length ? productRel[0].id : null;
