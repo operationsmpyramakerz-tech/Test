@@ -1558,12 +1558,33 @@ app.get(
           const productUrl = prod.url;
 
           const reason = props.Reason?.title?.[0]?.plain_text || "No Reason";
-          const qty = props["Quantity Requested"]?.number || 0;
-          const status =
-            props["Status"]?.select?.name ||
-            props["Status"]?.status?.name ||
-            "Pending";
-          const createdTime = page.created_time;
+
+// Qty in the UI should come from "Quantity Progress" (fallback to "Quantity Requested" if missing)
+const qtyProgress =
+  parseNumberProp(getPropInsensitive(props, "Quantity Progress")) ??
+  parseNumberProp(getPropInsensitive(props, "Quantity progress"));
+
+const qtyRequested =
+  parseNumberProp(getPropInsensitive(props, "Quantity Requested")) ??
+  props["Quantity Requested"]?.number ??
+  0;
+
+const qty = Number.isFinite(Number(qtyProgress))
+  ? Number(qtyProgress)
+  : Number(qtyRequested) || 0;
+
+// Status + Notion label color
+const statusPropObj = getPropInsensitive(props, "Status") || props["Status"];
+const status =
+  statusPropObj?.select?.name ||
+  statusPropObj?.status?.name ||
+  "Pending";
+const statusColor =
+  statusPropObj?.select?.color ||
+  statusPropObj?.status?.color ||
+  null;
+
+const createdTime = page.created_time;
           // 🔥 Extract S.V Approval (select/status)
 const svApproval =
   props["S.V Approval"]?.select?.name ||
@@ -1599,8 +1620,38 @@ if (svApproval !== "Approved") continue;
             assignedToName = assignedToNames[0] || "";
           }
 
-          
-all.push({
+          // Operations (who clicked "Received by operations")
+          const opsProp = getPropInsensitive(props, "Operations") || props["Operations"];
+          let operationsByIds = [];
+          let operationsByNames = [];
+          let operationsById = "";
+          let operationsByName = "";
+
+          if (opsProp?.type === "relation") {
+            const rel = opsProp.relation;
+            if (Array.isArray(rel) && rel.length) {
+              operationsByIds = rel.map((r) => r.id).filter(Boolean);
+              operationsByNames = await Promise.all(
+                operationsByIds.map((id) => memberName(id)),
+              );
+              operationsById = operationsByIds[0] || "";
+              operationsByName = operationsByNames[0] || "";
+            }
+          } else if (opsProp?.type === "people") {
+            const ppl = opsProp.people || [];
+            operationsByIds = ppl.map((p) => p.id).filter(Boolean);
+            operationsByNames = ppl.map((p) => p.name).filter(Boolean);
+            operationsById = operationsByIds[0] || "";
+            operationsByName = operationsByNames[0] || "";
+          } else if (opsProp?.type === "rich_text") {
+            const t = (opsProp.rich_text || []).map((r) => r.plain_text).join("").trim();
+            if (t) {
+              operationsByNames = [t];
+              operationsByName = t;
+            }
+          }
+
+          all.push({
     id: page.id,
     // Human-readable order identifier from Notion "ID" (unique_id)
     orderId: uid.text,
@@ -1614,6 +1665,11 @@ all.push({
     unitPrice,
     quantity: qty,
     status,
+    statusColor,
+    operationsByIds,
+    operationsByNames,
+    operationsById,
+    operationsByName,
     createdTime,
     createdById,
     createdByName,
@@ -1739,18 +1795,47 @@ app.post(
           ? { status: { name: shippedName } }
           : { select: { name: shippedName } };
 
+            const currentUserPageId = await getCurrentUserRelationPage(req);
+
+      // Also store who received the order in the "Operations" property (if present)
+      let operationsProp = null;
+      let operationsMeta = null;
+      for (const [key, meta] of Object.entries(dbProps || {})) {
+        if (normKey(key) === normKey("Operations")) {
+          operationsProp = key;
+          operationsMeta = meta;
+          break;
+        }
+      }
+
+      const shippedOpt = (opts || []).find((o) => norm(o?.name) === norm(shippedName));
+      const shippedColor = shippedOpt?.color || null;
+
+      const propsToUpdate = { [statusProp]: value };
+
+      if (operationsProp && currentUserPageId && operationsMeta?.type === "relation") {
+        propsToUpdate[operationsProp] = { relation: [{ id: currentUserPageId }] };
+      } else if (operationsProp && req.session.username && operationsMeta?.type === "rich_text") {
+        propsToUpdate[operationsProp] = {
+          rich_text: [{ text: { content: req.session.username } }],
+        };
+      }
+
       await Promise.all(
         ids.map((id) =>
           notion.pages.update({
             page_id: id,
-            properties: {
-              [statusProp]: value,
-            },
+            properties: propsToUpdate,
           }),
         ),
       );
 
-      res.json({ success: true, status: shippedName });
+      res.json({
+        success: true,
+        status: shippedName,
+        statusColor: shippedColor,
+        operationsByName: req.session.username || "",
+      });
     } catch (e) {
       console.error("mark-shipped error:", e.body || e);
       res.status(500).json({ error: "Failed to update status" });
@@ -1810,6 +1895,9 @@ app.post(
         }
       } catch {}
 
+      const arrivedOpt = (opts || []).find((o) => norm(o?.name) === norm(arrivedName));
+      const arrivedColor = arrivedOpt?.color || null;
+
       const value =
         statusType === "status"
           ? { status: { name: arrivedName } }
@@ -1826,7 +1914,7 @@ app.post(
         ),
       );
 
-      res.json({ success: true, status: arrivedName });
+      res.json({ success: true, status: arrivedName, statusColor: arrivedColor });
     } catch (e) {
       console.error("mark-arrived error:", e.body || e);
       res.status(500).json({ error: "Failed to update status" });
@@ -2034,7 +2122,16 @@ app.post(
       for (const p of pages) {
         const props = p.properties || {};
         const reason = props.Reason?.title?.[0]?.plain_text || "";
-        const qty = props["Quantity Requested"]?.number || 0;
+        // Qty should come from "Quantity Progress" (fallback to "Quantity Requested")
+        const qtyProgressProp = props["Quantity Progress"] || props["Quantity progress"];
+        const qtyProgress =
+          qtyProgressProp?.number ??
+          qtyProgressProp?.formula?.number ??
+          qtyProgressProp?.rollup?.number ??
+          null;
+        const qtyRequested = props["Quantity Requested"]?.number || 0;
+        const qty =
+          qtyProgress !== null && qtyProgress !== undefined ? qtyProgress : qtyRequested;
         const productRel = props.Product?.relation;
         const productPageId =
           Array.isArray(productRel) && productRel.length ? productRel[0].id : null;
