@@ -615,6 +615,13 @@ body.sidebar-collapsed .sidebar-toggle svg{ transform:rotate(180deg); }
   margin-top: 6px;
 }
 
+.co-received-by{
+  margin-top: 6px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #6B7280;
+}
+
 .co-actions{
   display: inline-flex;
   align-items: center;
