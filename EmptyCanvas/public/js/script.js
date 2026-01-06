@@ -221,10 +221,24 @@ document.addEventListener('DOMContentLoaded', () => {
     if (modalEls.statusTitle) modalEls.statusTitle.textContent = stage.label;
     if (modalEls.statusSub) modalEls.statusSub.textContent = stage.sub;
 
+    // In Current Orders we may receive BOTH the original quantity (Quantity Requested)
+    // and an Operations-adjusted quantity (Quantity Received by operations).
+    // The UI should:
+    // - show the Qty normally by default
+    // - only strike the old number and show the new one IF Operations edited it
+    const effectiveQty = (x) => {
+      const baseCandidate = Number(x?.quantityRequested);
+      const base = Number.isFinite(baseCandidate) ? baseCandidate : (Number(x?.quantity) || 0);
+      const rec = (typeof x?.quantityReceived === 'number' && Number.isFinite(x.quantityReceived))
+        ? Number(x.quantityReceived)
+        : null;
+      return rec !== null && rec !== undefined ? rec : base;
+    };
+
     // Meta
-    const totalQty = items.reduce((sum, x) => sum + (Number(x.quantity) || 0), 0);
+    const totalQty = items.reduce((sum, x) => sum + effectiveQty(x), 0);
     const estimateTotal = items.reduce(
-      (sum, x) => sum + (Number(x.quantity) || 0) * (Number(x.unitPrice) || 0),
+      (sum, x) => sum + effectiveQty(x) * (Number(x.unitPrice) || 0),
       0,
     );
 
@@ -241,9 +255,21 @@ document.addEventListener('DOMContentLoaded', () => {
       } else {
         const frag = document.createDocumentFragment();
         for (const it of items) {
-          const qty = Number(it.quantity) || 0;
+          // Base qty = original requested (if provided), else fall back to the qty returned.
+          const baseCandidate = Number(it?.quantityRequested);
+          const qtyBase = Number.isFinite(baseCandidate) ? baseCandidate : (Number(it.quantity) || 0);
+          const qtyReceived = (typeof it?.quantityReceived === 'number' && Number.isFinite(it.quantityReceived))
+            ? Number(it.quantityReceived)
+            : null;
+          const qty = qtyReceived !== null && qtyReceived !== undefined ? qtyReceived : qtyBase;
           const unit = Number(it.unitPrice) || 0;
           const lineTotal = qty * unit;
+
+          // Show old qty normally, and only strike it when Operations changed it
+          const showDiff = qtyReceived !== null && qtyReceived !== undefined && qtyReceived !== qtyBase;
+          const qtyHTML = showDiff
+            ? `<span class="sv-qty-diff"><span class="sv-qty-old">${escapeHTML(String(qtyBase))}</span><strong class="sv-qty-new">${escapeHTML(String(qtyReceived))}</strong></span>`
+            : `<strong>${escapeHTML(String(qtyBase))}</strong>`;
 
           const safeUrl = safeHttpUrl(it.productUrl);
           const linkHTML = safeUrl
@@ -261,7 +287,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 <div class="co-item-name">${escapeHTML(it.productName || 'Unknown Product')}</div>
                 ${linkHTML}
               </div>
-              <div class="co-item-sub">Reason: ${escapeHTML(it.reason || '—')} · Qty: ${escapeHTML(String(qty))} · Unit: ${escapeHTML(fmtMoney(unit))}</div>
+              <div class="co-item-sub">Reason: ${escapeHTML(it.reason || '—')} · Qty: ${qtyHTML} · Unit: ${escapeHTML(fmtMoney(unit))}</div>
             </div>
             <div class="co-item-right">
               <div class="co-item-total">${escapeHTML(fmtMoney(lineTotal))}</div>
