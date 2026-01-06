@@ -20,11 +20,18 @@ document.addEventListener("DOMContentLoaded", () => {
   const modalTotalQty = document.getElementById("reqModalTotalQty");
   const modalTotalPrice = document.getElementById("reqModalTotalPrice");
   const modalItems = document.getElementById("reqModalItems");
-
-  const excelBtn = document.getElementById("reqDownloadExcelBtn");
-  const shippedBtn = document.getElementById("reqMarkShippedBtn");
-  const arrivedBtn = document.getElementById("reqMarkArrivedBtn");
-
+  const excelBtn =
+    document.getElementById("reqExcelBtn") ||
+    document.getElementById("reqDownloadExcelBtn");
+  const pdfBtn =
+    document.getElementById("reqPdfBtn") ||
+    document.getElementById("reqDownloadPdfBtn");
+  const shippedBtn =
+    document.getElementById("reqReceivedBtn") ||
+    document.getElementById("reqMarkShippedBtn");
+  const arrivedBtn =
+    document.getElementById("reqReceivedShippedBtn") ||
+    document.getElementById("reqMarkArrivedBtn");
   // Tracker steps
   const stepEls = {
     1: document.getElementById("reqStep1"),
@@ -260,6 +267,21 @@ document.addEventListener("DOMContentLoaded", () => {
     return "Multiple";
   }
 
+  // Quantity shown to Operations can use the dedicated "Quantity Received by operations" column
+  // (if filled). Otherwise we fallback to the base quantity coming from Notion (Quantity Progress / Requested).
+  function effectiveQty(it) {
+    const rec =
+      it &&
+      typeof it.quantityReceived === "number" &&
+      Number.isFinite(it.quantityReceived)
+        ? Number(it.quantityReceived)
+        : null;
+    const base = Number(it?.quantity) || 0;
+    return rec !== null && rec !== undefined ? rec : base;
+  }
+
+
+
   function buildGroups(items) {
     const map = new Map();
 
@@ -295,9 +317,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const groups = Array.from(map.values()).map((g) => {
       const itemsArr = g.items || [];
-      const totalQty = itemsArr.reduce((sum, x) => sum + (Number(x.quantity) || 0), 0);
+      const totalQty = itemsArr.reduce((sum, x) => sum + effectiveQty(x), 0);
       const estimateTotal = itemsArr.reduce(
-        (sum, x) => sum + (Number(x.quantity) || 0) * (Number(x.unitPrice) || 0),
+        (sum, x) => sum + effectiveQty(x) * (Number(x.unitPrice) || 0),
         0,
       );
       const stage = computeStage(itemsArr);
@@ -462,6 +484,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Actions visibility
     if (excelBtn) excelBtn.style.display = "inline-flex";
+    if (pdfBtn) pdfBtn.style.display = "inline-flex";
 
     if (shippedBtn) shippedBtn.style.display = stage.idx < 4 ? "inline-flex" : "none";
     if (arrivedBtn) arrivedBtn.style.display = stage.idx === 4 ? "inline-flex" : "none";
@@ -471,12 +494,24 @@ document.addEventListener("DOMContentLoaded", () => {
       modalItems.innerHTML = "";
       const frag = document.createDocumentFragment();
 
+      const canEditQty = (stage?.idx || 1) < 4;
+
       for (const it of items) {
         const product = escapeHTML(it.productName || "Component");
         const reason = escapeHTML(it.reason || "");
-        const qty = Number(it.quantity) || 0;
+        const qtyBase = Number(it.quantity) || 0;
+        const qtyReceived =
+          typeof it.quantityReceived === "number" && Number.isFinite(it.quantityReceived)
+            ? Number(it.quantityReceived)
+            : null;
+        const qtyEffective = qtyReceived !== null && qtyReceived !== undefined ? qtyReceived : qtyBase;
         const unit = Number(it.unitPrice) || 0;
-        const total = qty * unit;
+        const total = qtyEffective * unit;
+
+        const showReceived = qtyReceived !== null && qtyReceived !== undefined && qtyReceived !== qtyBase;
+        const qtyHTML = showReceived
+          ? `<span class="sv-qty-diff"><span class="sv-qty-old">${escapeHTML(String(qtyBase))}</span><strong class="sv-qty-new" data-role="qty-val">${escapeHTML(String(qtyReceived))}</strong></span>`
+          : `<strong data-role="qty-val">${escapeHTML(String(qtyEffective))}</strong>`;
 
         const stVars = notionColorVars(it.statusColor);
         const stStyle = `--tag-bg:${stVars.bg};--tag-fg:${stVars.fg};--tag-border:${stVars.bd};`;
@@ -488,6 +523,14 @@ document.addEventListener("DOMContentLoaded", () => {
              </a>`
           : "";
 
+        const editBtnHTML = canEditQty
+          ? `<div class="btn-group" style="justify-content:flex-end; margin-top:8px;">
+               <button class="btn btn-warning btn-xs ro-edit" data-id="${escapeHTML(it.id)}" type="button" title="Edit received qty">
+                 <i data-feather="edit-2"></i> Edit
+               </button>
+             </div>`
+          : "";
+
         const row = document.createElement("div");
         row.className = "co-item";
         row.innerHTML = `
@@ -496,11 +539,12 @@ document.addEventListener("DOMContentLoaded", () => {
               <span>${product}</span>
               ${linkHTML}
             </div>
-            <div class="co-item-sub">Reason: ${reason} · Qty: ${qty} · Unit: ${fmtMoney(unit)}</div>
+            <div class="co-item-sub">Reason: ${reason} · Qty: ${qtyHTML} · Unit: ${fmtMoney(unit)}</div>
           </div>
           <div class="co-item-right">
             <div class="co-item-total">${fmtMoney(total)}</div>
             <div class="co-item-status" style="${stStyle}">${escapeHTML(it.status || "—")}</div>
+            ${editBtnHTML}
           </div>
         `;
         frag.appendChild(row);
@@ -590,6 +634,64 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 }
 
+  async function downloadPdf(g) {
+    if (!g || !g.orderIds || !g.orderIds.length) return;
+
+    if (pdfBtn) {
+      pdfBtn.disabled = true;
+      pdfBtn.dataset.prevText = pdfBtn.textContent || "";
+      pdfBtn.textContent = "Preparing...";
+    }
+
+    try {
+      const res = await fetch("/api/orders/requested/export/pdf", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ orderIds: g.orderIds }),
+      });
+
+      if (res.status === 401) {
+        window.location.href = "/login";
+        return;
+      }
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || "Failed to export PDF");
+      }
+
+      const blob = await res.blob();
+
+      // filename from content-disposition
+      const cd = res.headers.get("content-disposition") || "";
+      let filename = "order.pdf";
+      const m = cd.match(/filename\*=UTF-8''([^;]+)|filename=\"?([^;\"]+)\"?/i);
+      if (m) filename = decodeURIComponent(m[1] || m[2] || filename);
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+
+      toast("success", "Downloaded", "PDF downloaded.");
+    } catch (e) {
+      console.error(e);
+      alert(e.message || "Failed to export PDF");
+    } finally {
+      if (pdfBtn) {
+        pdfBtn.disabled = false;
+        const prev = pdfBtn.dataset.prevText;
+        if (prev) pdfBtn.textContent = prev;
+        else pdfBtn.textContent = "Download PDF";
+      }
+    }
+  }
+
 async function postJson(url, body) {
     const res = await fetch(url, {
       method: "POST",
@@ -604,7 +706,124 @@ async function postJson(url, body) {
     return data;
   }
 
-  async function markReceivedByOperations(g) {
+    // ===== Edit quantity (writes to Notion: "Quantity Received by operations") =====
+  let popEl = null, popForId = null, popAnchor = null;
+
+  function destroyPopover() {
+    if (popEl?.parentNode) popEl.parentNode.removeChild(popEl);
+    popEl = null; popForId = null; popAnchor = null;
+    document.removeEventListener("pointerdown", onDocPointerDown, true);
+    document.removeEventListener("keydown", onPopEsc, true);
+  }
+
+  function onDocPointerDown(e) {
+    if (!popEl) return;
+    if (popEl.contains(e.target)) return;
+    if (popAnchor && popAnchor.contains(e.target)) return;
+    destroyPopover();
+  }
+
+  function onPopEsc(e) {
+    if (e.key === "Escape") destroyPopover();
+  }
+
+  function placePopoverNear(btn) {
+    const r = btn.getBoundingClientRect();
+    const x = Math.min(window.innerWidth - 260, Math.max(8, r.right - 220));
+    const y = Math.min(window.innerHeight - 140, r.bottom + 8);
+    popEl.style.left = `${x + window.scrollX}px`;
+    popEl.style.top  = `${y + window.scrollY}px`;
+  }
+
+  async function updateReceivedQty(itemId, value) {
+    const id = String(itemId || "").trim();
+    if (!id) throw new Error("Missing item id.");
+    return postJson(`/api/orders/requested/${encodeURIComponent(id)}/received-quantity`, { value });
+  }
+
+  async function openQtyPopover(btn, id) {
+    if (!btn || !id) return;
+    if (popEl && popForId === id) { destroyPopover(); return; }
+    destroyPopover();
+    popForId = id; popAnchor = btn;
+
+    const it = allItems.find((x) => String(x.id) === String(id));
+    const base = Number(it?.quantity) || 0;
+    const rec =
+      it &&
+      typeof it.quantityReceived === "number" &&
+      Number.isFinite(it.quantityReceived)
+        ? Number(it.quantityReceived)
+        : null;
+
+    const currentVal = rec !== null && rec !== undefined ? rec : base;
+
+    popEl = document.createElement("div");
+    popEl.className = "sv-qty-popover";
+    popEl.innerHTML = `
+      <div class="sv-qty-popover__arrow"></div>
+      <div class="sv-qty-popover__body">
+        <div class="sv-qty-row">
+          <button class="sv-qty-btn sv-qty-dec" type="button" aria-label="Decrease">−</button>
+          <input class="sv-qty-input" type="number" min="0" step="1" value="${escapeHTML(String(currentVal))}" />
+          <button class="sv-qty-btn sv-qty-inc" type="button" aria-label="Increase">+</button>
+        </div>
+        <div class="sv-qty-actions">
+          <button class="btn btn-success btn-xs ro-qty-save">Save</button>
+          <button class="btn btn-danger btn-xs ro-qty-cancel">Cancel</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(popEl);
+    placePopoverNear(btn);
+
+    const input  = popEl.querySelector(".sv-qty-input");
+    const decBtn = popEl.querySelector(".sv-qty-dec");
+    const incBtn = popEl.querySelector(".sv-qty-inc");
+    const saveBtn= popEl.querySelector(".ro-qty-save");
+    const cancel = popEl.querySelector(".ro-qty-cancel");
+
+    input.focus(); input.select();
+
+    decBtn.addEventListener("click", () => { input.value = Math.max(0, (Number(input.value) || 0) - 1); });
+    incBtn.addEventListener("click", () => { input.value = Math.max(0, (Number(input.value) || 0) + 1); });
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") saveBtn.click(); });
+
+    saveBtn.addEventListener("click", async () => {
+      const v = Math.max(0, Math.floor(Number(input.value) || 0));
+      try {
+        await updateReceivedQty(id, v);
+
+        // update in-memory data
+        const idx = allItems.findIndex((x) => String(x.id) === String(id));
+        if (idx >= 0) allItems[idx].quantityReceived = v;
+
+        // rebuild + rerender (keep modal open)
+        groups = buildGroups(allItems);
+        render();
+
+        if (activeGroup && orderModal?.classList.contains("is-open")) {
+          const updated = groups.find((x) => x.groupId === activeGroup.groupId);
+          if (updated) openOrderModal(updated);
+        }
+
+        toast("success", "Updated", "Quantity updated.");
+        destroyPopover();
+      } catch (e) {
+        console.error(e);
+        toast("error", "Failed", e.message || "Failed to update quantity.");
+      }
+    });
+
+    cancel.addEventListener("click", destroyPopover);
+
+    setTimeout(() => {
+      document.addEventListener("pointerdown", onDocPointerDown, true);
+      document.addEventListener("keydown", onPopEsc, true);
+    }, 0);
+  }
+
+async function markReceivedByOperations(g) {
     if (!g || !g.orderIds?.length) return;
 
     if (shippedBtn) {
@@ -744,7 +963,16 @@ async function postJson(url, body) {
     if (e.key === "Escape" && orderModal?.classList.contains("is-open")) closeOrderModal();
   });
 
+  modalItems?.addEventListener("click", (e) => {
+    const btn = e.target.closest("button.ro-edit");
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+    openQtyPopover(btn, btn.dataset.id);
+  });
+
   excelBtn?.addEventListener("click", () => downloadExcel(activeGroup));
+  pdfBtn?.addEventListener("click", () => downloadPdf(activeGroup));
   shippedBtn?.addEventListener("click", () => markReceivedByOperations(activeGroup));
   arrivedBtn?.addEventListener("click", () => markArrived(activeGroup));
 
