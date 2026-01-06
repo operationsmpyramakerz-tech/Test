@@ -1805,18 +1805,25 @@ app.post(
 
       const desired = "Shipped";
       let shippedName = desired;
+      // Pull options safely so we can:
+      // 1) choose an exact option name (avoids Notion "option not found")
+      // 2) return the label color to the UI
+      let statusOptions = [];
       try {
-        const opts =
+        statusOptions =
           statusType === "status"
-            ? dbPropMeta?.status?.options
-            : dbPropMeta?.select?.options;
-        if (Array.isArray(opts) && opts.length) {
-          const norm = (s) => String(s || "").trim().toLowerCase();
-          const exact = opts.find((o) => norm(o?.name) === norm(desired));
-          const partial = opts.find((o) => norm(o?.name).includes(norm(desired)));
-          shippedName = (exact?.name || partial?.name || desired);
-        }
-      } catch {}
+            ? (dbPropMeta?.status?.options || [])
+            : (dbPropMeta?.select?.options || []);
+        if (!Array.isArray(statusOptions)) statusOptions = [];
+      } catch {
+        statusOptions = [];
+      }
+
+      if (statusOptions.length) {
+        const exact = statusOptions.find((o) => norm(o?.name) === norm(desired));
+        const partial = statusOptions.find((o) => norm(o?.name).includes(norm(desired)));
+        shippedName = (exact?.name || partial?.name || desired);
+      }
 
       const value =
         statusType === "status"
@@ -1847,7 +1854,7 @@ app.post(
         if (operationsProp) break;
       }
 
-      const shippedOpt = (opts || []).find((o) => norm(o?.name) === norm(shippedName));
+      const shippedOpt = (statusOptions || []).find((o) => norm(o?.name) === norm(shippedName));
       const shippedColor = shippedOpt?.color || null;
 
       const propsToUpdate = { [statusProp]: value };
