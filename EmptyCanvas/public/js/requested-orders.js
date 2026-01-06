@@ -524,11 +524,9 @@ document.addEventListener("DOMContentLoaded", () => {
           : "";
 
         const editBtnHTML = canEditQty
-          ? `<div class="btn-group" style="justify-content:flex-end; margin-top:8px;">
-               <button class="btn btn-warning btn-xs ro-edit" data-id="${escapeHTML(it.id)}" type="button" title="Edit received qty">
-                 <i data-feather="edit-2"></i> Edit
-               </button>
-             </div>`
+          ? `<button class="btn btn-warning btn-xs ro-edit ro-edit-inline" data-id="${escapeHTML(it.id)}" type="button" title="Edit received qty">
+               <i data-feather="edit-2"></i> Edit
+             </button>`
           : "";
 
         const row = document.createElement("div");
@@ -543,8 +541,10 @@ document.addEventListener("DOMContentLoaded", () => {
           </div>
           <div class="co-item-right">
             <div class="co-item-total">${fmtMoney(total)}</div>
-            <div class="co-item-status" style="${stStyle}">${escapeHTML(it.status || "—")}</div>
-            ${editBtnHTML}
+            <div class="co-item-right-row">
+              <div class="co-item-status" style="${stStyle}">${escapeHTML(it.status || "—")}</div>
+              ${editBtnHTML}
+            </div>
           </div>
         `;
         frag.appendChild(row);
@@ -584,7 +584,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   if (excelBtn) {
     excelBtn.disabled = true;
-    excelBtn.dataset.prevText = excelBtn.textContent || "";
+    excelBtn.dataset.prevHtml = excelBtn.innerHTML;
     excelBtn.textContent = "Preparing...";
   }
 
@@ -629,7 +629,9 @@ document.addEventListener("DOMContentLoaded", () => {
   } finally {
     if (excelBtn) {
       excelBtn.disabled = false;
-      excelBtn.textContent = excelBtn.dataset.prevText || "Download Excel";
+      const prev = excelBtn.dataset.prevHtml;
+      if (prev) excelBtn.innerHTML = prev;
+      else excelBtn.textContent = "Download Excel";
     }
   }
 }
@@ -639,7 +641,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     if (pdfBtn) {
       pdfBtn.disabled = true;
-      pdfBtn.dataset.prevText = pdfBtn.textContent || "";
+      pdfBtn.dataset.prevHtml = pdfBtn.innerHTML;
       pdfBtn.textContent = "Preparing...";
     }
 
@@ -685,8 +687,8 @@ document.addEventListener("DOMContentLoaded", () => {
     } finally {
       if (pdfBtn) {
         pdfBtn.disabled = false;
-        const prev = pdfBtn.dataset.prevText;
-        if (prev) pdfBtn.textContent = prev;
+        const prev = pdfBtn.dataset.prevHtml;
+        if (prev) pdfBtn.innerHTML = prev;
         else pdfBtn.textContent = "Download PDF";
       }
     }
@@ -828,7 +830,7 @@ async function markReceivedByOperations(g) {
 
     if (shippedBtn) {
       shippedBtn.disabled = true;
-      shippedBtn.dataset.prevText = shippedBtn.textContent || "";
+      shippedBtn.dataset.prevHtml = shippedBtn.innerHTML;
       shippedBtn.textContent = "Receiving...";
     }
 
@@ -862,7 +864,9 @@ async function markReceivedByOperations(g) {
     } finally {
       if (shippedBtn) {
         shippedBtn.disabled = false;
-        shippedBtn.textContent = shippedBtn.dataset.prevText || "Received by operations";
+        const prev = shippedBtn.dataset.prevHtml;
+        if (prev) shippedBtn.innerHTML = prev;
+        else shippedBtn.textContent = "Received by operations";
       }
     }
   }
@@ -872,7 +876,7 @@ async function markReceivedByOperations(g) {
 
     if (arrivedBtn) {
       arrivedBtn.disabled = true;
-      arrivedBtn.dataset.prevText = arrivedBtn.textContent || "";
+      arrivedBtn.dataset.prevHtml = arrivedBtn.innerHTML;
       arrivedBtn.textContent = "Marking...";
     }
 
@@ -901,7 +905,9 @@ async function markReceivedByOperations(g) {
     } finally {
       if (arrivedBtn) {
         arrivedBtn.disabled = false;
-        arrivedBtn.textContent = arrivedBtn.dataset.prevText || "Received";
+        const prev = arrivedBtn.dataset.prevHtml;
+        if (prev) arrivedBtn.innerHTML = prev;
+        else arrivedBtn.textContent = "Received";
       }
     }
   }
