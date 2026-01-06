@@ -1008,20 +1008,12 @@ app.get(
             statusProp?.select?.color || statusProp?.status?.color || "default";
 
           const qtyRequested = page.properties?.["Quantity Requested"]?.number || 0;
-          const qtyReceivedRaw =
+          const qtyReceived =
             receivedProp && page.properties?.[receivedProp]
               ? page.properties?.[receivedProp]?.number
               : null;
-          const qtyReceived =
-            typeof qtyReceivedRaw === "number" && Number.isFinite(qtyReceivedRaw)
-              ? qtyReceivedRaw
-              : null;
-
-          // Quantity shown in the Current Orders UI:
-          // - If Operations entered a value in "Quantity Received by operations", we display it.
-          // - Otherwise we display the requested quantity.
           const qtyForUI =
-            qtyReceived !== null && qtyReceived !== undefined
+            qtyReceived !== null && qtyReceived !== undefined && Number.isFinite(Number(qtyReceived))
               ? Number(qtyReceived)
               : Number(qtyRequested) || 0;
 
@@ -1038,8 +1030,6 @@ app.get(
             productUrl,
             unitPrice,
             quantity: qtyForUI,
-            quantityRequested: Number(qtyRequested) || 0,
-            quantityReceived: qtyReceived,
             status: statusName,
             statusColor,
             createdById,
@@ -1602,11 +1592,7 @@ const qty = Number.isFinite(Number(qtyProgress))
   : Number(qtyRequested) || 0;
 
 const qtyReceivedRaw = receivedQtyPropName ? parseNumberProp(props[receivedQtyPropName]) : null;
-// IMPORTANT: keep "empty" as null (Notion number can be null). Don't coerce null -> 0.
-const qtyReceived =
-  typeof qtyReceivedRaw === "number" && Number.isFinite(qtyReceivedRaw)
-    ? qtyReceivedRaw
-    : null;
+const qtyReceived = Number.isFinite(Number(qtyReceivedRaw)) ? Number(qtyReceivedRaw) : null;
 
 // Status + Notion label color
 const statusPropObj = getPropInsensitive(props, "Status") || props["Status"];
@@ -1844,6 +1830,60 @@ app.post(
           ? { status: { name: shippedName } }
           : { select: { name: shippedName } };
 
+      // When user clicks "Received by operations" we want to ensure
+      // "Quantity received by operations" is filled for ALL items:
+      // - If the user edited an item qty, we keep the edited value (already stored).
+      // - If the user did NOT edit an item qty, we write the original qty (Quantity Progress / Requested).
+      const receivedProp = await (async () => {
+        // Prefer hardbind if exists and is number
+        const props = await getOrdersDBProps();
+        if (props?.[REC_PROP_HARDBIND]?.type === "number") return REC_PROP_HARDBIND;
+        return await detectReceivedQtyPropName();
+      })();
+
+      // Helpers local to this route
+      const getPropInsensitive = (props, name) => {
+        const target = normKey(name);
+        for (const k of Object.keys(props || {})) {
+          if (normKey(k) === target) return props[k];
+        }
+        return null;
+      };
+
+      const parseNumberProp = (prop) => {
+        if (!prop) return null;
+        try {
+          if (prop.type === "number") return prop.number ?? null;
+          if (prop.type === "formula") {
+            if (prop.formula?.type === "number") return prop.formula.number ?? null;
+            if (prop.formula?.type === "string") {
+              const n = parseFloat(String(prop.formula.string || "").replace(/[^0-9.]/g, ""));
+              return Number.isFinite(n) ? n : null;
+            }
+          }
+          if (prop.type === "rollup") {
+            if (prop.rollup?.type === "number") return prop.rollup.number ?? null;
+            if (prop.rollup?.type === "array") {
+              const arr = prop.rollup.array || [];
+              for (const x of arr) {
+                if (x.type === "number" && typeof x.number === "number") return x.number;
+                if (x.type === "formula" && x.formula?.type === "number") return x.formula.number;
+                if (x.type === "formula" && x.formula?.type === "string") {
+                  const n = parseFloat(String(x.formula.string || "").replace(/[^0-9.]/g, ""));
+                  if (Number.isFinite(n)) return n;
+                }
+              }
+            }
+          }
+          if (prop.type === "rich_text") {
+            const t = (prop.rich_text || []).map((r) => r.plain_text).join("").trim();
+            const n = parseFloat(t.replace(/[^0-9.]/g, ""));
+            return Number.isFinite(n) ? n : null;
+          }
+        } catch {}
+        return null;
+      };
+
             const currentUserPageId = await getCurrentUserRelationPage(req);
 
       // Store who clicked "Received by operations" in the proper Notion column (Relation),
@@ -1882,12 +1922,50 @@ app.post(
       }
 
       await Promise.all(
-        ids.map((id) =>
-          notion.pages.update({
+        ids.map(async (id) => {
+          // Retrieve current page to check if received qty is already set
+          // (so we don't overwrite user edits)
+          let pageProps = null;
+          try {
+            const page = await notion.pages.retrieve({ page_id: id });
+            pageProps = page?.properties || {};
+          } catch (err) {
+            console.error("mark-shipped retrieve error:", err?.body || err);
+            pageProps = null;
+          }
+
+          const updateProps = { ...propsToUpdate };
+
+          if (receivedProp && pageProps) {
+            const recValRaw = parseNumberProp(pageProps[receivedProp]);
+            const recVal = Number.isFinite(Number(recValRaw)) ? Number(recValRaw) : null;
+
+            // Fill only if it's missing (null/undefined/NaN)
+            if (recVal === null) {
+              const qtyProgressRaw =
+                parseNumberProp(getPropInsensitive(pageProps, "Quantity Progress")) ??
+                parseNumberProp(getPropInsensitive(pageProps, "Quantity progress"));
+
+              const qtyRequestedRaw =
+                parseNumberProp(getPropInsensitive(pageProps, "Quantity Requested")) ??
+                parseNumberProp(getPropInsensitive(pageProps, "Quantity requested"));
+
+              const baseQtyNum = Number.isFinite(Number(qtyProgressRaw))
+                ? Number(qtyProgressRaw)
+                : Number.isFinite(Number(qtyRequestedRaw))
+                  ? Number(qtyRequestedRaw)
+                  : 0;
+
+              const safeQty = Math.max(0, Math.floor(baseQtyNum || 0));
+              updateProps[receivedProp] = { number: safeQty };
+            }
+          }
+
+          return notion.pages.update({
             page_id: id,
-            properties: propsToUpdate,
-          }),
-        ),
+            properties: updateProps,
+          });
+        }),
       );
 
       res.json({
@@ -1936,16 +2014,17 @@ app.post(
 
       const desiredCandidates = ["Arrived", "Delivered", "Received"]; // try these in order
       let arrivedName = desiredCandidates[0];
+      let arrivedOptions = [];
       try {
         const opts =
           statusType === "status"
             ? dbPropMeta?.status?.options
             : dbPropMeta?.select?.options;
-        if (Array.isArray(opts) && opts.length) {
-          const norm = (s) => String(s || "").trim().toLowerCase();
+        arrivedOptions = Array.isArray(opts) ? opts : [];
+        if (arrivedOptions.length) {
           for (const cand of desiredCandidates) {
-            const exact = opts.find((o) => norm(o?.name) === norm(cand));
-            const partial = opts.find((o) => norm(o?.name).includes(norm(cand)));
+            const exact = arrivedOptions.find((o) => norm(o?.name) === norm(cand));
+            const partial = arrivedOptions.find((o) => norm(o?.name).includes(norm(cand)));
             const picked = exact?.name || partial?.name;
             if (picked) {
               arrivedName = picked;
@@ -1955,7 +2034,7 @@ app.post(
         }
       } catch {}
 
-      const arrivedOpt = (opts || []).find((o) => norm(o?.name) === norm(arrivedName));
+      const arrivedOpt = (arrivedOptions || []).find((o) => norm(o?.name) === norm(arrivedName));
       const arrivedColor = arrivedOpt?.color || null;
 
       const value =
