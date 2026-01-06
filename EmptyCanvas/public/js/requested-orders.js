@@ -292,28 +292,55 @@ document.addEventListener("DOMContentLoaded", () => {
       return db - da;
     });
 
+    // Grouping should match Current Orders behavior:
+    // group all components that were created at the same time (to the minute),
+    // regardless of per-component Reason (reasons can differ per product).
+    const pad2 = (n) => String(n).padStart(2, "0");
+    const timeKey = (dateLike) => {
+      const d = toDate(dateLike);
+      if (!d) return "0";
+      const yyyy = d.getFullYear();
+      const mm = pad2(d.getMonth() + 1);
+      const dd = pad2(d.getDate());
+      const hh = pad2(d.getHours());
+      const mi = pad2(d.getMinutes());
+      return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
+    };
+
     for (const it of sorted) {
       const created = toDate(it.createdTime);
-      const minuteKey = created ? Math.floor(created.getTime() / 60000) : 0;
-
-      const gKey = [
-        String(it.createdById || "").trim(),
-        String(it.reason || "").trim(),
-        String(minuteKey),
-      ].join("|");
+      const gKey = [String(it.createdById || "").trim(), timeKey(created)].join("|");
 
       if (!map.has(gKey)) {
         map.set(gKey, {
           groupId: gKey,
           createdById: it.createdById || "",
           createdByName: it.createdByName || "",
-          reason: it.reason || "",
+          // We keep a group-level summary reason for search only.
+          // The modal always shows per-item reasons.
+          reason: "",
           latestCreated: created ? created.toISOString() : "",
           items: [],
         });
       }
       map.get(gKey).items.push(it);
     }
+
+    // Same summarization idea as Current Orders (helps search UX)
+    const summarizeReasons = (itemsArr) => {
+      const counts = new Map();
+      for (const it of itemsArr || []) {
+        const r = String(it?.reason || "").trim();
+        if (!r) continue;
+        counts.set(r, (counts.get(r) || 0) + 1);
+      }
+      const entries = Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
+      const unique = entries.map(([k]) => k);
+      if (unique.length === 0) return { title: "", uniqueReasons: [] };
+      if (unique.length === 1) return { title: unique[0], uniqueReasons: unique };
+      const main = unique[0];
+      return { title: `${main} +${unique.length - 1}`, uniqueReasons: unique };
+    };
 
     const groups = Array.from(map.values()).map((g) => {
       const itemsArr = g.items || [];
@@ -323,9 +350,12 @@ document.addEventListener("DOMContentLoaded", () => {
         0,
       );
       const stage = computeStage(itemsArr);
+      const rs = summarizeReasons(itemsArr);
 
       return {
         ...g,
+        reason: rs.title,
+        reasons: rs.uniqueReasons,
         orderIds: itemsArr.map((x) => x.id).filter(Boolean),
         itemsCount: itemsArr.length,
         totalQty,
@@ -355,10 +385,12 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!q) return true;
     const hay = [
       g.reason,
+      ...(Array.isArray(g.reasons) ? g.reasons : []),
       g.orderIdRange,
       g.createdByName,
       g.operationsByName,
       ...(g.items || []).map((x) => x.productName),
+      ...(g.items || []).map((x) => x.reason),
     ]
       .filter(Boolean)
       .join(" ");
