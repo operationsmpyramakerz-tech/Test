@@ -1596,12 +1596,18 @@ const qtyRequested =
   props["Quantity Requested"]?.number ??
   0;
 
-const qty = Number.isFinite(Number(qtyProgress))
-  ? Number(qtyProgress)
-  : Number(qtyRequested) || 0;
+const qty =
+  qtyProgress !== null && qtyProgress !== undefined && Number.isFinite(Number(qtyProgress))
+    ? Number(qtyProgress)
+    : Number(qtyRequested) || 0;
 
 const qtyReceivedRaw = receivedQtyPropName ? parseNumberProp(props[receivedQtyPropName]) : null;
-const qtyReceived = Number.isFinite(Number(qtyReceivedRaw)) ? Number(qtyReceivedRaw) : null;
+const qtyReceived =
+  qtyReceivedRaw === null || qtyReceivedRaw === undefined
+    ? null
+    : Number.isFinite(Number(qtyReceivedRaw))
+      ? Number(qtyReceivedRaw)
+      : null;
 
 // Status + Notion label color
 const statusPropObj = getPropInsensitive(props, "Status") || props["Status"];
@@ -1947,7 +1953,12 @@ app.post(
 
           if (receivedProp && pageProps) {
             const recValRaw = parseNumberProp(pageProps[receivedProp]);
-            const recVal = Number.isFinite(Number(recValRaw)) ? Number(recValRaw) : null;
+            const recVal =
+              recValRaw === null || recValRaw === undefined
+                ? null
+                : Number.isFinite(Number(recValRaw))
+                  ? Number(recValRaw)
+                  : null;
 
             // Fill only if it's missing (null/undefined/NaN)
             if (recVal === null) {
@@ -1959,11 +1970,16 @@ app.post(
                 parseNumberProp(getPropInsensitive(pageProps, "Quantity Requested")) ??
                 parseNumberProp(getPropInsensitive(pageProps, "Quantity requested"));
 
-              const baseQtyNum = Number.isFinite(Number(qtyProgressRaw))
-                ? Number(qtyProgressRaw)
-                : Number.isFinite(Number(qtyRequestedRaw))
-                  ? Number(qtyRequestedRaw)
-                  : 0;
+              const baseQtyNum =
+                qtyProgressRaw !== null &&
+                qtyProgressRaw !== undefined &&
+                Number.isFinite(Number(qtyProgressRaw))
+                  ? Number(qtyProgressRaw)
+                  : qtyRequestedRaw !== null &&
+                      qtyRequestedRaw !== undefined &&
+                      Number.isFinite(Number(qtyRequestedRaw))
+                    ? Number(qtyRequestedRaw)
+                    : 0;
 
               const safeQty = Math.max(0, Math.floor(baseQtyNum || 0));
               updateProps[receivedProp] = { number: safeQty };
@@ -2338,7 +2354,12 @@ app.post(
 
         // Received qty (Operations override)
         const recQtyRaw = receivedProp ? parseNumberProp(props[receivedProp]) : null;
-        const qty = Number.isFinite(Number(recQtyRaw)) ? Number(recQtyRaw) : Number(baseQty) || 0;
+        const qty =
+          recQtyRaw === null || recQtyRaw === undefined
+            ? Number(baseQty) || 0
+            : Number.isFinite(Number(recQtyRaw))
+              ? Number(recQtyRaw)
+              : Number(baseQty) || 0;
 
         const productRel = props.Product?.relation;
         const productPageId =
@@ -2618,7 +2639,12 @@ app.post(
 
         // Use received quantity if Operations already set it
         const recQtyRaw = receivedProp ? parseNumberProp(props[receivedProp]) : null;
-        const qty = Number.isFinite(Number(recQtyRaw)) ? Number(recQtyRaw) : Number(baseQty) || 0;
+        const qty =
+          recQtyRaw === null || recQtyRaw === undefined
+            ? Number(baseQty) || 0
+            : Number.isFinite(Number(recQtyRaw))
+              ? Number(recQtyRaw)
+              : Number(baseQty) || 0;
         const productRel = props.Product?.relation;
         const productPageId =
           Array.isArray(productRel) && productRel.length ? productRel[0].id : null;
