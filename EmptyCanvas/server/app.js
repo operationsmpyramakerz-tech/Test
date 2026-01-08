@@ -164,16 +164,25 @@ function extractAllowedPages(props = {}) {
 }
 
 function firstAllowedPath(allowed = []) {
-  if (allowed.includes("Current Orders")) return "/orders";
-  if (allowed.includes("Requested Orders")) return "/orders/requested";
-  if (allowed.includes("Assigned Schools Requested Orders")) return "/orders/assigned";
-  if (allowed.includes("Create New Order")) return "/orders/new";
-  if (allowed.includes("Stocktaking")) return "/stocktaking";
-  if (allowed.includes("Funds")) return "/funds";
-  if (allowed.includes("Expenses")) return "/expenses";
-   if (allowed.includes("Expenses Users")) return "/expenses/users";  // ⬅ الجديد
-  if (allowed.includes("Logistics")) return "/logistics";
-  return "/login";
+  const list = Array.isArray(allowed) ? allowed : [];
+
+  // Prefer a deterministic order for the best UX
+  if (list.includes("Current Orders")) return "/orders";
+  if (list.includes("Requested Orders")) return "/orders/requested";
+  if (list.includes("Assigned Schools Requested Orders")) return "/orders/assigned";
+  if (list.includes("S.V schools orders")) return "/orders/sv-orders";
+  if (list.includes("Create New Order")) return "/orders/new";
+  if (list.includes("Stocktaking")) return "/stocktaking";
+  if (list.includes("Logistics")) return "/logistics";
+  if (list.includes("Damaged Assets")) return "/damaged-assets";
+  if (list.includes("S.V Schools Assets")) return "/sv-assets";
+  if (list.includes("Funds")) return "/funds";
+  if (list.includes("Expenses Users")) return "/expenses/users";
+  if (list.includes("Expenses")) return "/expenses";
+
+  // Fallback (important): avoid redirect loops if user only has a page we don't recognize.
+  // /account does NOT require page permission, so it is a safe landing page.
+  return "/account";
 }
 
 // Helpers — Notion
