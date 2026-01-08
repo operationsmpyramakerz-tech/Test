@@ -2375,105 +2375,20 @@ app.post(
       );
       res.setHeader("Cache-Control", "no-store");
 
-      const doc = new PDFDocument({ size: "A4", margin: 36 });
-      doc.pipe(res);
-
-      // Title
-      doc.fontSize(20).text("Delivery Receipt", { align: "center" });
-      doc.moveDown(0.3);
-      doc.fontSize(10).text("Operations Hub", { align: "center" });
-      doc.moveDown(1);
-
-      // Meta
-      doc.fontSize(11);
-      doc.text(`Order ID: ${orderIdRange}`);
-      doc.text(`Date: ${createdAt.toLocaleString("en-US")}`);
-      doc.text(`Team member: ${teamMember || "—"}`);
-      doc.text(`Prepared by (Operations): ${req.session.username || "—"}`);
-      doc.moveDown(0.8);
-
-      // Table layout
-      const pageW = doc.page.width - doc.page.margins.left - doc.page.margins.right;
-      const col1 = doc.page.margins.left;
-      const wComponent = pageW * 0.34;
-      const wReason = pageW * 0.28;
-      const wQty = pageW * 0.10;
-      const wUnit = pageW * 0.14;
-      const wTotal = pageW * 0.14;
-
-      const xComponent = col1;
-      const xReason = xComponent + wComponent;
-      const xQty = xReason + wReason;
-      const xUnit = xQty + wQty;
-      const xTotal = xUnit + wUnit;
-
-      const drawHeader = () => {
-        doc.fontSize(11).font("Helvetica-Bold");
-        const y = doc.y;
-        doc.text("Component", xComponent, y, { width: wComponent - 6 });
-        doc.text("Reason", xReason, y, { width: wReason - 6 });
-        doc.text("Qty", xQty, y, { width: wQty - 6, align: "right" });
-        doc.text("Unit", xUnit, y, { width: wUnit - 6, align: "right" });
-        doc.text("Total", xTotal, y, { width: wTotal - 6, align: "right" });
-        doc.moveDown(0.4);
-        doc.font("Helvetica").fontSize(10);
-        doc.moveTo(doc.page.margins.left, doc.y).lineTo(doc.page.width - doc.page.margins.right, doc.y).strokeColor("#dddddd").stroke();
-        doc.moveDown(0.2);
-      };
-
-      const ensureSpace = (h) => {
-        const bottom = doc.page.height - doc.page.margins.bottom;
-        if (doc.y + h > bottom) {
-          doc.addPage();
-          drawHeader();
-        }
-      };
-
-      drawHeader();
-
-      for (const r of rows) {
-        const compText = String(r.component || "");
-        const reasonText = String(r.reason || "");
-        const qtyText = String(Number(r.qty) || 0);
-        const unitText = money(r.unit);
-        const totalText = money(r.total);
-
-        const h1 = doc.heightOfString(compText, { width: wComponent - 6 });
-        const h2 = doc.heightOfString(reasonText, { width: wReason - 6 });
-        const rowH = Math.max(h1, h2, 12) + 6;
-
-        ensureSpace(rowH + 4);
-
-        const y = doc.y;
-        doc.text(compText, xComponent, y, { width: wComponent - 6 });
-        doc.text(reasonText, xReason, y, { width: wReason - 6 });
-        doc.text(qtyText, xQty, y, { width: wQty - 6, align: "right" });
-        doc.text(unitText, xUnit, y, { width: wUnit - 6, align: "right" });
-        doc.text(totalText, xTotal, y, { width: wTotal - 6, align: "right" });
-
-        doc.y = y + rowH;
-        doc.moveTo(doc.page.margins.left, doc.y).lineTo(doc.page.width - doc.page.margins.right, doc.y).strokeColor("#f0f0f0").stroke();
-        doc.moveDown(0.2);
-      }
-
-      doc.moveDown(0.6);
-      doc.font("Helvetica-Bold").fontSize(11);
-      doc.text(`Total quantity: ${grandQty}`, { align: "right" });
-      doc.text(`Grand total: ${money(grandTotal)}`, { align: "right" });
-      doc.font("Helvetica").fontSize(10);
-      doc.moveDown(1.2);
-
-      // Signatures
-      doc.fontSize(11).font("Helvetica-Bold").text("Handover confirmation", { underline: true });
-      doc.font("Helvetica").fontSize(11).moveDown(0.6);
-
-      doc.text("Delivered to (Name): ________________________________");
-      doc.text("Signature: ____________________    Date: ____ / ____ / ______");
-      doc.moveDown(0.8);
-      doc.text("Operations (Name): ________________________________");
-      doc.text("Signature: ____________________    Date: ____ / ____ / ______");
-
-      doc.end();
+      // Generate a nicer PDF (logo + meta table + better signatures layout)
+      const { pipeDeliveryReceiptPDF } = require("./deliveryReceiptPdf");
+      pipeDeliveryReceiptPDF(
+        {
+          orderId: orderIdRange,
+          createdAt,
+          teamMember,
+          preparedBy: req.session.username || "—",
+          rows,
+          grandQty,
+          grandTotal,
+        },
+        res,
+      );
     } catch (e) {
       console.error("export requested pdf error:", e.body || e);
       try {
