@@ -104,10 +104,11 @@ document.addEventListener('DOMContentLoaded', function() {
       thead.innerHTML = `
         <tr>
           <th>Component</th>
-          <th class="col-kit">One Kit Quantity</th>
           <th class="col-num">In Stock</th>
+          <th class="col-num col-inventory">Inventory</th>
         </tr>
       `;
+
 
       const tbody = document.createElement('tbody');
       group.items
@@ -119,17 +120,18 @@ document.addEventListener('DOMContentLoaded', function() {
           tdName.textContent = item.name || '-';
           tdName.style.fontWeight = '600';
 
-          const tdKit = document.createElement('td');
-          tdKit.className = 'col-kit';
-          tdKit.appendChild(makeQtyPill(item.oneKitQuantity));
+          const tdInStock = document.createElement('td');
+          tdInStock.className = 'col-num';
+          tdInStock.textContent = (item.quantity ?? 0).toString();
 
-          const tdQty = document.createElement('td');
-          tdQty.className = 'col-num';
-          tdQty.textContent = (item.quantity ?? 0).toString();
+          const tdInventory = document.createElement('td');
+          tdInventory.className = 'col-num col-inventory';
+          // Blank cell for manual inventory counting / writing
+          tdInventory.innerHTML = '&nbsp;';
 
           tr.appendChild(tdName);
-          tr.appendChild(tdKit);
-          tr.appendChild(tdQty);
+          tr.appendChild(tdInStock);
+          tr.appendChild(tdInventory);
           tbody.appendChild(tr);
         });
 
