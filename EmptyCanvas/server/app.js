@@ -4182,13 +4182,6 @@ app.get(
               "Untitled";
 
             const quantity = firstDefinedNumber(props[schoolName]);
-            const oneKitQuantity = firstDefinedNumber(
-              props["One Kit Quantity"],
-              props["One Kit Qty"],
-              props["One kit qty"],
-              props["Kit Qty"],
-              props["OneKitQuantity"],
-            );
 
             let tag = null;
             if (props.Tag?.select) {
@@ -4214,7 +4207,6 @@ app.get(
               id: page.id,
               name: componentName,
               quantity: Number(quantity) || 0,
-              oneKitQuantity: Number(oneKitQuantity) || 0,
               tag,
             };
           })
@@ -4225,7 +4217,7 @@ app.get(
         startCursor = stockResponse.next_cursor;
       }
 
-      // Grouping + PDF layout (كما هو)
+      // ===== Grouping =====
       const groupsMap = new Map();
       (allStock || []).forEach((it) => {
         const name = it?.tag?.name || "Untagged";
@@ -4247,12 +4239,20 @@ app.get(
         )
         .concat(untagged);
 
+      // ===== PDF =====
       const fname = `Stocktaking-${new Date().toISOString().slice(0, 10)}.pdf`;
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader("Content-Disposition", `attachment; filename="${fname}"`);
 
       const doc = new PDFDocument({ size: "A4", margin: 36 });
       doc.pipe(res);
+
+      const COLORS = {
+        border: "#E5E7EB",
+        muted: "#6B7280",
+        text: "#111827",
+        headerBg: "#F3F4F6",
+      };
 
       const palette = {
         default: { fill: "#F3F4F6", border: "#E5E7EB", text: "#111827" },
@@ -4268,26 +4268,266 @@ app.get(
       };
       const getPal = (c = "default") => palette[c] || palette.default;
 
-      doc
-        .font("Helvetica-Bold")
-        .fontSize(18)
-        .fillColor("#111827")
-        .text("Stocktaking", { align: "left" });
-      doc.moveDown(0.2);
-      doc
-        .font("Helvetica")
-        .fontSize(10)
-        .fillColor("#6B7280")
-        .text(`School: ${schoolName}`, { continued: true })
-        .text(`   •   Generated: ${new Date().toLocaleString()}`);
-      doc.moveDown(0.6);
+      const createdAt = new Date();
+      const teamMember = String(req.session.username || "—");
+      const preparedBy = teamMember;
 
-      const pageInnerWidth =
-        doc.page.width - doc.page.margins.left - doc.page.margins.right;
+      function formatDateTime(date) {
+        try {
+          const d = date instanceof Date ? date : new Date(date);
+          if (Number.isNaN(d.getTime())) return String(date || "-");
+          return d.toLocaleString("en-GB", {
+            day: "2-digit",
+            month: "short",
+            year: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+        } catch {
+          return String(date || "-");
+        }
+      }
+
+      const logoPath = path.join(
+        __dirname,
+        "..",
+        "public",
+        "images",
+        "Logo horizontal.png",
+      );
+
+      // ===== Signature footer sizing (draw on every page) =====
+      const sigTitleH = 22;
+      const sigBoxesH = 120;
+      const sigBlockH = sigTitleH + 14 + 6 + sigBoxesH + 10;
+
+      const drawPageHeader = ({ compact = false } = {}) => {
+        const pageW = doc.page.width;
+        const mL = doc.page.margins.left;
+        const mR = doc.page.margins.right;
+        const mT = doc.page.margins.top;
+        const contentW = pageW - mL - mR;
+
+        const headerTop = mT;
+        const headerH = compact ? 42 : 56;
+
+        // Logo (top-right)
+        try {
+          const logoW = compact ? 140 : 170;
+          const logoX = pageW - mR - logoW;
+          const logoY = headerTop - 4;
+          doc.image(logoPath, logoX, logoY, { width: logoW });
+        } catch {
+          // ignore
+        }
+
+        // Title (left)
+        const titleX = mL;
+        const titleY = headerTop + (compact ? 2 : 6);
+        const titleW = contentW - (compact ? 150 : 180);
+
+        doc
+          .fillColor(COLORS.text)
+          .font("Helvetica-Bold")
+          .fontSize(compact ? 16 : 20)
+          .text("Stocktaking", titleX, titleY, {
+            width: Math.max(120, titleW),
+            align: "left",
+          });
+
+        doc
+          .fillColor(COLORS.muted)
+          .font("Helvetica")
+          .fontSize(10)
+          .text(
+            compact
+              ? `School: ${schoolName || "-"}`
+              : `School: ${schoolName || "-"}   •   Generated: ${formatDateTime(createdAt)}`,
+            titleX,
+            titleY + (compact ? 18 : 24),
+            {
+              width: Math.max(120, titleW),
+              align: "left",
+            },
+          );
+
+        // Divider
+        const lineY = headerTop + headerH;
+        doc
+          .moveTo(mL, lineY)
+          .lineTo(pageW - mR, lineY)
+          .lineWidth(1)
+          .strokeColor(COLORS.border)
+          .stroke();
+
+        doc.y = lineY + 14;
+      };
+
+      const drawSignatureFooter = () => {
+        const prevY = doc.y;
+
+        const pageW = doc.page.width;
+        const pageH = doc.page.height;
+        const mL = doc.page.margins.left;
+        const mR = doc.page.margins.right;
+        const mB = doc.page.margins.bottom;
+        const contentW = pageW - mL - mR;
+
+        const bottomY = pageH - mB;
+        const startY = bottomY - sigBlockH;
+
+        const gap = 16;
+        const boxW = (contentW - gap) / 2;
+        const boxH = sigBoxesH;
+        const boxY = startY + 14 + 6;
+        const leftX = mL;
+        const rightX = mL + boxW + gap;
+
+        const drawSignatureBox = (title, x, y) => {
+          doc.roundedRect(x, y, boxW, boxH, 10).lineWidth(1).strokeColor(COLORS.border).stroke();
+          doc.fillColor(COLORS.text).font("Helvetica-Bold").fontSize(10);
+          doc.text(title, x + 12, y + 10, { width: boxW - 24, align: "left" });
+
+          const lineStartX = x + 12;
+          const lineEndX = x + boxW - 12;
+
+          doc.fillColor(COLORS.muted).font("Helvetica").fontSize(9);
+
+          doc.text("Name", lineStartX, y + 34);
+          doc
+            .moveTo(lineStartX + 40, y + 45)
+            .lineTo(lineEndX, y + 45)
+            .lineWidth(1)
+            .strokeColor(COLORS.border)
+            .stroke();
+
+          doc.text("Signature", lineStartX, y + 58);
+          doc
+            .moveTo(lineStartX + 55, y + 69)
+            .lineTo(lineEndX, y + 69)
+            .lineWidth(1)
+            .strokeColor(COLORS.border)
+            .stroke();
+
+          doc.text("Date", lineStartX, y + 82);
+          doc
+            .moveTo(lineStartX + 30, y + 93)
+            .lineTo(lineStartX + 95, y + 93)
+            .lineWidth(1)
+            .strokeColor(COLORS.border)
+            .stroke();
+          doc.fillColor(COLORS.muted).font("Helvetica").fontSize(9).text("/", lineStartX + 102, y + 84);
+          doc
+            .moveTo(lineStartX + 110, y + 93)
+            .lineTo(lineStartX + 175, y + 93)
+            .lineWidth(1)
+            .strokeColor(COLORS.border)
+            .stroke();
+          doc.fillColor(COLORS.muted).font("Helvetica").fontSize(9).text("/", lineStartX + 182, y + 84);
+          doc
+            .moveTo(lineStartX + 190, y + 93)
+            .lineTo(lineEndX, y + 93)
+            .lineWidth(1)
+            .strokeColor(COLORS.border)
+            .stroke();
+        };
+
+        doc.save();
+        doc.fillColor(COLORS.text).font("Helvetica-Bold").fontSize(12);
+        doc.text("Handover confirmation", mL, startY, { width: contentW, align: "left" });
+
+        drawSignatureBox("Delivered to", leftX, boxY);
+        drawSignatureBox("Operations", rightX, boxY);
+
+        doc.restore();
+        doc.y = prevY;
+      };
+
+      const contentBottomY = () =>
+        doc.page.height - doc.page.margins.bottom - sigBlockH;
+
+      const ensureSpace = (needH, onNewPage) => {
+        const bottom = contentBottomY();
+        if (doc.y + needH > bottom) {
+          doc.addPage();
+          drawPageHeader({ compact: true });
+          drawSignatureFooter();
+          onNewPage?.();
+        }
+      };
+
+      // ===== Page 1 header + footer =====
+      drawPageHeader({ compact: false });
+      drawSignatureFooter();
+
+      // ===== Meta small table (page 1) =====
+      const pageW1 = doc.page.width;
+      const mL1 = doc.page.margins.left;
+      const mR1 = doc.page.margins.right;
+      const contentW1 = pageW1 - mL1 - mR1;
+
+      const metaX = mL1;
+      const metaY = doc.y;
+      const metaW = contentW1;
+      const metaRowH = 30;
+      const metaH = metaRowH * 2;
+      const metaColW = metaW / 2;
+
+      // If the footer is very close (rare), start a new page.
+      ensureSpace(metaH + 20, () => {
+        // Page 2+ doesn't have the meta table; if we ever hit this, just continue.
+      });
+
+      doc
+        .roundedRect(metaX, metaY, metaW, metaH, 8)
+        .lineWidth(1)
+        .strokeColor(COLORS.border)
+        .stroke();
+
+      doc
+        .moveTo(metaX + metaColW, metaY)
+        .lineTo(metaX + metaColW, metaY + metaH)
+        .strokeColor(COLORS.border)
+        .stroke();
+      doc
+        .moveTo(metaX, metaY + metaRowH)
+        .lineTo(metaX + metaW, metaY + metaRowH)
+        .strokeColor(COLORS.border)
+        .stroke();
+
+      const drawMetaCell = (label, value, x, y, w) => {
+        const padX = 10;
+        doc
+          .fillColor(COLORS.muted)
+          .font("Helvetica")
+          .fontSize(9)
+          .text(label, x + padX, y + 6, { width: w - padX * 2, align: "left" });
+        doc
+          .fillColor(COLORS.text)
+          .font("Helvetica-Bold")
+          .fontSize(11)
+          .text(value || "—", x + padX, y + 16, { width: w - padX * 2, align: "left" });
+      };
+
+      drawMetaCell("School", String(schoolName || "—"), metaX, metaY, metaColW);
+      drawMetaCell("Date", formatDateTime(createdAt), metaX + metaColW, metaY, metaColW);
+      drawMetaCell("Team member", teamMember, metaX, metaY + metaRowH, metaColW);
+      drawMetaCell(
+        "Prepared by (Operations)",
+        preparedBy,
+        metaX + metaColW,
+        metaY + metaRowH,
+        metaColW,
+      );
+
+      doc.y = metaY + metaH + 18;
+
+      // ===== Grouped table layout =====
+      const pageInnerWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
       const gap = 10;
-      const colKitW = 120;
-      const colQtyW = 90;
-      const colNameW = pageInnerWidth - colKitW - colQtyW - gap * 2;
+      const colInStockW = 90;
+      const colInvW = 110;
+      const colNameW = pageInnerWidth - colInStockW - colInvW - gap * 2;
 
       const drawGroupHeader = (gName, pal, count, cont = false) => {
         const y = doc.y + 2;
@@ -4300,7 +4540,7 @@ app.get(
           .lineWidth(1)
           .fillAndStroke();
         doc
-          .fillColor("#6B7280")
+          .fillColor(COLORS.muted)
           .font("Helvetica-Bold")
           .fontSize(10)
           .text("Tag", doc.page.margins.left + 10, y + 6);
@@ -4327,7 +4567,7 @@ app.get(
           .text(pillText, pillX + pillPadX, pillY + 3);
         const countTxt = `${count} items`;
         doc
-          .fillColor("#111827")
+          .fillColor(COLORS.text)
           .font("Helvetica-Bold")
           .text(countTxt, doc.page.margins.left, y + 5, {
             width: pageInnerWidth - 10,
@@ -4352,15 +4592,16 @@ app.get(
         doc.text("Component", doc.page.margins.left + 10, y + 5, {
           width: colNameW,
         });
-        doc.text(
-          "One Kit Quantity",
-          doc.page.margins.left + 10 + colNameW + gap,
-          y + 5,
-          { width: colKitW - 10, align: "right" },
-        );
-        const lastX = doc.page.margins.left + colNameW + gap + colKitW + gap;
-        doc.text("In Stock", lastX, y + 5, {
-          width: colQtyW - 10,
+
+        const midX = doc.page.margins.left + 10 + colNameW + gap;
+        doc.text("In Stock", midX, y + 5, {
+          width: colInStockW - 10,
+          align: "right",
+        });
+
+        const lastX = doc.page.margins.left + colNameW + gap + colInStockW + gap;
+        doc.text("Inventory", lastX, y + 5, {
+          width: colInvW - 10,
           align: "right",
         });
 
@@ -4368,60 +4609,44 @@ app.get(
         doc.moveDown(1.2);
       };
 
-      const ensureSpace = (needH, onNewPage) => {
-        const bottom = doc.page.height - doc.page.margins.bottom;
-        if (doc.y + needH > bottom) {
-          doc.addPage();
-          onNewPage?.();
-        }
-      };
-
-      const drawRow = (item, pal) => {
-        const y = doc.y;
+      const drawRow = (item, pal, onNewPage) => {
         const nameHeight = doc.heightOfString(item.name || "-", {
           width: colNameW,
         });
         const rowH = Math.max(18, nameHeight);
-        ensureSpace(rowH + 8);
 
-        doc.font("Helvetica").fontSize(11).fillColor("#111827");
-        doc.text(item.name || "-", doc.page.margins.left + 2, doc.y, {
+        // Make sure the whole row fits above the signature footer
+        ensureSpace(rowH + 8, onNewPage);
+
+        const y = doc.y;
+
+        doc.font("Helvetica").fontSize(11).fillColor(COLORS.text);
+        doc.text(item.name || "-", doc.page.margins.left + 2, y, {
           width: colNameW,
         });
 
-        const text = String(Number(item.oneKitQuantity ?? 0));
-        const pillPadX = 8,
-          pillH = 16;
-        const pillW = Math.max(
-          32,
-          doc.widthOfString(text, { font: "Helvetica-Bold", size: 10 }) +
-            pillPadX * 2,
-        );
-        const pillX =
-          doc.page.margins.left + colNameW + gap + (colKitW - pillW - 10);
-        const pillY = y + (rowH - pillH) / 2;
+        const midX = doc.page.margins.left + colNameW + gap;
         doc
-          .roundedRect(pillX, pillY, pillW, pillH, 8)
-          .fillColor(pal.fill)
-          .strokeColor(pal.border)
-          .lineWidth(1)
-          .fillAndStroke();
-        doc
-          .fillColor(pal.text)
-          .font("Helvetica-Bold")
-          .fontSize(10)
-          .text(text, pillX + pillPadX, pillY + 3);
-
-        const lastX = doc.page.margins.left + colNameW + gap + colKitW + gap;
-        doc
-          .fillColor("#111827")
+          .fillColor(COLORS.text)
           .font("Helvetica")
           .fontSize(11)
-          .text(String(Number(item.quantity ?? 0)), lastX, y, {
-            width: colQtyW - 10,
+          .text(String(Number(item.quantity ?? 0)), midX, y, {
+            width: colInStockW - 10,
             align: "right",
           });
 
+        const lastX = doc.page.margins.left + colNameW + gap + colInStockW + gap;
+
+        // Blank inventory cell (draw a light underline so it can be filled manually)
+        const lineY = y + rowH - 2;
+        doc
+          .moveTo(lastX + 12, lineY)
+          .lineTo(lastX + colInvW - 18, lineY)
+          .strokeColor(COLORS.border)
+          .lineWidth(1)
+          .stroke();
+
+        // Row separator
         doc
           .moveTo(doc.page.margins.left, y + rowH + 4)
           .lineTo(doc.page.margins.left + pageInnerWidth, y + rowH + 4)
@@ -4443,11 +4668,10 @@ app.get(
 
         g.items.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
         for (const item of g.items) {
-          ensureSpace(40, () => {
+          drawRow(item, pal, () => {
             drawGroupHeader(g.name, pal, g.items.length, true);
             drawTableHead(pal);
           });
-          drawRow(item, pal);
         }
       }
 
@@ -4458,6 +4682,7 @@ app.get(
     }
   },
 );
+
 
 
 // Verify current password (used by Account page before saving)
