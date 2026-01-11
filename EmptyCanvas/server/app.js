@@ -4151,6 +4151,99 @@ function _extractIdCodeFromProps(props = {}) {
   return null;
 }
 
+// ===== Helpers: map Products(Name) -> Products(ID Code) =====
+// The user wants the ID Code coming specifically from the Products database column "ID Code".
+// We build a cached lookup table: normalized Product Name -> ID Code.
+function _normNameKey(s) {
+  return String(s || "")
+    .replace(/\u00A0/g, " ")
+    .trim()
+    .toLowerCase()
+    .replace(/[–—−]/g, "-")
+    .replace(/\s*-\s*/g, " - ")
+    .replace(/\s+/g, " ");
+}
+
+function _extractProductNameFromProps(props = {}) {
+  // In Products DB, "Name" is typically a rich_text (Aa) column (as per user's screenshot).
+  // We still support other possible names as fallback.
+  const candidates = ["Name", "Component", "Product", "Item", "Material"];
+  for (const name of candidates) {
+    const p = _propInsensitive(props, name) || props?.[name];
+    const t = _extractPropText(p);
+    if (t) return t;
+  }
+  return null;
+}
+
+const _PRODUCTS_IDCODE_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+let _productsNameToIdCodeCache = {
+  ts: 0,
+  db: null,
+  map: new Map(),
+};
+
+async function _getProductsNameToIdCodeMap() {
+  try {
+    if (!componentsDatabaseId) return new Map();
+
+    const now = Date.now();
+    if (
+      _productsNameToIdCodeCache.map &&
+      _productsNameToIdCodeCache.map.size > 0 &&
+      _productsNameToIdCodeCache.db === componentsDatabaseId &&
+      now - _productsNameToIdCodeCache.ts < _PRODUCTS_IDCODE_CACHE_TTL_MS
+    ) {
+      return _productsNameToIdCodeCache.map;
+    }
+
+    const map = new Map();
+    let hasMore = true;
+    let startCursor = undefined;
+
+    while (hasMore) {
+      const resp = await notion.databases.query({
+        database_id: componentsDatabaseId,
+        start_cursor: startCursor,
+        page_size: 100,
+      });
+
+      for (const page of resp.results || []) {
+        const props = page.properties || {};
+        const productName = _extractProductNameFromProps(props);
+        if (!productName) continue;
+
+        // Prefer the explicit Products column "ID Code" (often it is the Title property)
+        const idProp =
+          _propInsensitive(props, "ID Code") ||
+          _propInsensitive(props, "ID code") ||
+          props?.["ID Code"] ||
+          props?.["ID code"];
+
+        let idCode = _extractPropText(idProp);
+
+        // Fallback to other variants only if "ID Code" is missing
+        if (!idCode) idCode = _extractIdCodeFromProps(props);
+
+        if (!idCode) continue;
+
+        const key = _normNameKey(productName);
+        // Keep the first non-empty
+        if (!map.has(key) || !map.get(key)) map.set(key, idCode);
+      }
+
+      hasMore = resp.has_more;
+      startCursor = resp.next_cursor;
+    }
+
+    _productsNameToIdCodeCache = { ts: now, db: componentsDatabaseId, map };
+    return map;
+  } catch (e) {
+    console.error("Failed to build Products Name->ID Code map:", e.body || e);
+    return new Map();
+  }
+}
+
 app.get(
   "/api/stock",
   requireAuth,
@@ -4310,6 +4403,12 @@ app.all(
           .status(404)
           .json({ error: "Could not determine school name for the user." });
 
+const productsNameToIdCode = await _getProductsNameToIdCodeMap();
+const lookupIdCode = (componentName, fallbackProps) => {
+  const fromProducts = productsNameToIdCode.get(_normNameKey(componentName));
+  return fromProducts || _extractIdCodeFromProps(fallbackProps || {}) || "";
+};
+
       const allStock = [];
       let hasMore = true;
       let startCursor = undefined;
@@ -4346,7 +4445,7 @@ app.all(
 
             const quantity = firstDefinedNumber(props[schoolName]);
 
-            const idCode = _extractIdCodeFromProps(props);
+            const idCode = lookupIdCode(componentName, props);
 
             // Inventory values come from the UI (POST body). If the key exists, allow 0.
             let inventory = null;
@@ -4898,6 +4997,12 @@ app.all(
           .status(404)
           .json({ error: "Could not determine school name for the user." });
 
+const productsNameToIdCode = await _getProductsNameToIdCodeMap();
+const lookupIdCode = (componentName, fallbackProps) => {
+  const fromProducts = productsNameToIdCode.get(_normNameKey(componentName));
+  return fromProducts || _extractIdCodeFromProps(fallbackProps || {}) || "";
+};
+
       const createdAt = new Date();
       const formatDateTime = (date) => {
         try {
@@ -4950,7 +5055,7 @@ app.all(
               "Untitled";
 
             const quantity = firstDefinedNumber(props[schoolName]);
-            const idCode = _extractIdCodeFromProps(props);
+            const idCode = lookupIdCode(componentName, props);
 
             // Inventory values come from the UI (POST body). If the key exists, allow 0.
             let inventory = null;
@@ -5036,26 +5141,62 @@ app.all(
         };
       });
 
-      for (const r of visibleRows) {
-        const row = ws.addRow([
-          r.tag || "Untagged",
-          r.idCode || "",
-          r.component || "",
-          Number(r.inStock) || 0,
-          r.inventory === null || typeof r.inventory === "undefined" ? "" : Number(r.inventory),
-        ]);
-        row.getCell(4).numFmt = "0";
-        row.getCell(5).numFmt = "0";
-        row.eachCell((cell) => {
-          cell.border = {
-            top: { style: "thin", color: { argb: "FFEEEEEE" } },
-            left: { style: "thin", color: { argb: "FFEEEEEE" } },
-            bottom: { style: "thin", color: { argb: "FFEEEEEE" } },
-            right: { style: "thin", color: { argb: "FFEEEEEE" } },
-          };
-          cell.alignment = { vertical: "middle", wrapText: true };
-        });
-      }
+// Sort by Tag (ascending) and put "Untagged" at the end.
+// Also: insert a blank row between different tag groups (as requested).
+const groupsMap = new Map();
+(visibleRows || []).forEach((r) => {
+  const tagName = String(r.tag || "Untagged").trim() || "Untagged";
+  const key = _normNameKey(tagName);
+  if (!groupsMap.has(key)) groupsMap.set(key, { name: tagName, items: [] });
+  groupsMap.get(key).items.push(r);
+});
+
+let groups = Array.from(groupsMap.values()).sort((a, b) =>
+  String(a.name).localeCompare(String(b.name)),
+);
+const untaggedGroups = groups.filter(
+  (g) => _normNameKey(g.name) === "untagged" || String(g.name).trim() === "-",
+);
+groups = groups
+  .filter(
+    (g) =>
+      !(_normNameKey(g.name) === "untagged" || String(g.name).trim() === "-"),
+  )
+  .concat(untaggedGroups);
+
+groups.forEach((g, gi) => {
+  const items = (g.items || []).slice().sort((a, b) =>
+    String(a.component || "").localeCompare(String(b.component || "")),
+  );
+
+  for (const r of items) {
+    const row = ws.addRow([
+      r.tag || "Untagged",
+      r.idCode || "",
+      r.component || "",
+      Number(r.inStock) || 0,
+      r.inventory === null || typeof r.inventory === "undefined"
+        ? ""
+        : Number(r.inventory),
+    ]);
+    row.getCell(4).numFmt = "0";
+    row.getCell(5).numFmt = "0";
+    row.eachCell((cell) => {
+      cell.border = {
+        top: { style: "thin", color: { argb: "FFEEEEEE" } },
+        left: { style: "thin", color: { argb: "FFEEEEEE" } },
+        bottom: { style: "thin", color: { argb: "FFEEEEEE" } },
+        right: { style: "thin", color: { argb: "FFEEEEEE" } },
+      };
+      cell.alignment = { vertical: "middle", wrapText: true };
+    });
+  }
+
+  // blank row between tag groups (except after last)
+  if (gi !== groups.length - 1) {
+    ws.addRow([]);
+  }
+});
 
       ws.columns = [
         { width: 18 },
