@@ -4121,6 +4121,57 @@ function _extractPropText(prop) {
   return null;
 }
 
+function _extractPropNumber(prop) {
+  try {
+    if (!prop) return null;
+
+    if (prop.type === "number" && typeof prop.number === "number") return prop.number;
+
+    if (prop.type === "formula") {
+      if (prop.formula?.type === "number" && typeof prop.formula.number === "number") {
+        return prop.formula.number;
+      }
+      if (prop.formula?.type === "string") {
+        const t = String(prop.formula.string || "").trim();
+        if (!t) return null;
+        const n = parseFloat(t.replace(/[^0-9.]/g, ""));
+        return Number.isFinite(n) ? n : null;
+      }
+    }
+
+    if (prop.type === "rollup") {
+      if (prop.rollup?.type === "number" && typeof prop.rollup.number === "number") {
+        return prop.rollup.number;
+      }
+      if (prop.rollup?.type === "array") {
+        const arr = prop.rollup.array || [];
+        for (const x of arr) {
+          if (x?.type === "number" && typeof x.number === "number") return x.number;
+          if (x?.type === "formula" && x.formula?.type === "number" && typeof x.formula.number === "number") {
+            return x.formula.number;
+          }
+          if (x?.type === "formula" && x.formula?.type === "string") {
+            const n = parseFloat(String(x.formula.string || "").replace(/[^0-9.]/g, ""));
+            if (Number.isFinite(n)) return n;
+          }
+          if (x?.type === "rich_text") {
+            const t = (x.rich_text || []).map((r) => r?.plain_text || "").join("").trim();
+            const n = parseFloat(t.replace(/[^0-9.]/g, ""));
+            if (Number.isFinite(n)) return n;
+          }
+        }
+      }
+    }
+
+    if (prop.type === "rich_text") {
+      const t = (prop.rich_text || []).map((r) => r?.plain_text || "").join("").trim();
+      const n = parseFloat(t.replace(/[^0-9.]/g, ""));
+      return Number.isFinite(n) ? n : null;
+    }
+  } catch {}
+  return null;
+}
+
 function _extractIdCodeFromProps(props = {}) {
   // Prefer explicit property names
   const candidates = [
@@ -4183,6 +4234,13 @@ let _productsNameToIdCodeCache = {
   map: new Map(),
 };
 
+const _PRODUCTS_PRICE_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+let _productsNameToUnityPriceCache = {
+  ts: 0,
+  db: null,
+  map: new Map(),
+};
+
 async function _getProductsNameToIdCodeMap() {
   try {
     if (!componentsDatabaseId) return new Map();
@@ -4240,6 +4298,69 @@ async function _getProductsNameToIdCodeMap() {
     return map;
   } catch (e) {
     console.error("Failed to build Products Name->ID Code map:", e.body || e);
+    return new Map();
+  }
+}
+
+// ===== Helpers: map Products(Name) -> Products(Unity Price) =====
+// Used for Stocktaking Excel export only.
+async function _getProductsNameToUnityPriceMap() {
+  try {
+    if (!componentsDatabaseId) return new Map();
+
+    const now = Date.now();
+    if (
+      _productsNameToUnityPriceCache.map &&
+      _productsNameToUnityPriceCache.map.size > 0 &&
+      _productsNameToUnityPriceCache.db === componentsDatabaseId &&
+      now - _productsNameToUnityPriceCache.ts < _PRODUCTS_PRICE_CACHE_TTL_MS
+    ) {
+      return _productsNameToUnityPriceCache.map;
+    }
+
+    const map = new Map();
+    let hasMore = true;
+    let startCursor = undefined;
+
+    while (hasMore) {
+      const resp = await notion.databases.query({
+        database_id: componentsDatabaseId,
+        start_cursor: startCursor,
+        page_size: 100,
+      });
+
+      for (const page of resp.results || []) {
+        const props = page.properties || {};
+        const productName = _extractProductNameFromProps(props);
+        if (!productName) continue;
+
+        const priceProp =
+          _propInsensitive(props, "Unity Price") ||
+          _propInsensitive(props, "Unit price") ||
+          _propInsensitive(props, "Unit Price") ||
+          _propInsensitive(props, "Price") ||
+          props?.["Unity Price"] ||
+          props?.["Unit price"] ||
+          props?.["Unit Price"] ||
+          props?.Price;
+
+        const unityPrice = _extractPropNumber(priceProp);
+        if (unityPrice === null || typeof unityPrice === "undefined") continue;
+
+        const key = _normNameKey(productName);
+        if (!map.has(key) || map.get(key) === null || typeof map.get(key) === "undefined") {
+          map.set(key, unityPrice);
+        }
+      }
+
+      hasMore = resp.has_more;
+      startCursor = resp.next_cursor;
+    }
+
+    _productsNameToUnityPriceCache = { ts: now, db: componentsDatabaseId, map };
+    return map;
+  } catch (e) {
+    console.error("_getProductsNameToUnityPriceMap error:", e.body || e);
     return new Map();
   }
 }
@@ -4403,11 +4524,12 @@ app.all(
           .status(404)
           .json({ error: "Could not determine school name for the user." });
 
-const productsNameToIdCode = await _getProductsNameToIdCodeMap();
-const lookupIdCode = (componentName, fallbackProps) => {
-  const fromProducts = productsNameToIdCode.get(_normNameKey(componentName));
-  return fromProducts || _extractIdCodeFromProps(fallbackProps || {}) || "";
-};
+      const productsNameToIdCode = await _getProductsNameToIdCodeMap();
+
+      const lookupIdCode = (componentName, fallbackProps) => {
+        const fromProducts = productsNameToIdCode.get(_normNameKey(componentName));
+        return fromProducts || _extractIdCodeFromProps(fallbackProps || {}) || "";
+      };
 
       const allStock = [];
       let hasMore = true;
@@ -4527,6 +4649,7 @@ const lookupIdCode = (componentName, fallbackProps) => {
         border: "#E5E7EB",
         muted: "#6B7280",
         text: "#111827",
+        danger: "#DC2626",
         headerBg: "#F3F4F6",
       };
 
@@ -4909,8 +5032,12 @@ const lookupIdCode = (componentName, fallbackProps) => {
         // Inventory: if there is a value from the UI, print it; otherwise draw an underline.
         const invHasValue = item.inventory !== null && typeof item.inventory !== "undefined";
         if (invHasValue) {
+          const invNum = Number(item.inventory);
+          const stockNum = Number(item.quantity ?? 0);
+          const mismatch = Number.isFinite(invNum) && Number.isFinite(stockNum) && invNum !== stockNum;
+
           doc
-            .fillColor(COLORS.text)
+            .fillColor(mismatch ? COLORS.danger : COLORS.text)
             .font("Helvetica")
             .fontSize(11)
             .text(String(Number(item.inventory)), lastX, y, {
@@ -4997,11 +5124,18 @@ app.all(
           .status(404)
           .json({ error: "Could not determine school name for the user." });
 
-const productsNameToIdCode = await _getProductsNameToIdCodeMap();
-const lookupIdCode = (componentName, fallbackProps) => {
-  const fromProducts = productsNameToIdCode.get(_normNameKey(componentName));
-  return fromProducts || _extractIdCodeFromProps(fallbackProps || {}) || "";
-};
+      const productsNameToIdCode = await _getProductsNameToIdCodeMap();
+      const productsNameToUnityPrice = await _getProductsNameToUnityPriceMap();
+
+      const lookupIdCode = (componentName, fallbackProps) => {
+        const fromProducts = productsNameToIdCode.get(_normNameKey(componentName));
+        return fromProducts || _extractIdCodeFromProps(fallbackProps || {}) || "";
+      };
+
+      const lookupUnityPrice = (componentName) => {
+        const n = productsNameToUnityPrice.get(_normNameKey(componentName));
+        return typeof n === "number" && Number.isFinite(n) ? n : null;
+      };
 
       const createdAt = new Date();
       const formatDateTime = (date) => {
@@ -5078,6 +5212,7 @@ const lookupIdCode = (componentName, fallbackProps) => {
               component: componentName,
               inStock: Number(quantity) || 0,
               inventory,
+              unityPrice: lookupUnityPrice(componentName),
             };
           })
           .filter(Boolean);
@@ -5095,11 +5230,20 @@ const lookupIdCode = (componentName, fallbackProps) => {
       const ws = wb.addWorksheet("Stocktaking");
 
       // ---- Meta small table (one row) ----
-      ws.addRow(["School", String(schoolName || "—"), "Date", formatDateTime(createdAt)]);
+      // Make the Date cell full-width by merging across the remaining columns.
+      ws.addRow([
+        "School",
+        String(schoolName || "—"),
+        "Date",
+        formatDateTime(createdAt),
+        "",
+        "",
+      ]);
+      ws.mergeCells("D1:F1");
       const metaRow = ws.getRow(1);
       metaRow.height = 20;
-      // Style meta cells A1:D1
-      for (const col of [1, 2, 3, 4]) {
+      // Style meta cells A1:F1
+      for (const col of [1, 2, 3, 4, 5, 6]) {
         const cell = metaRow.getCell(col);
         cell.border = {
           top: { style: "thin", color: { argb: "FFDDDDDD" } },
@@ -5116,6 +5260,7 @@ const lookupIdCode = (componentName, fallbackProps) => {
         c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFEFEFEF" } };
       });
       // Value cells
+      // Date value is the merged cell starting at D1.
       [2, 4].forEach((col) => {
         const c = metaRow.getCell(col);
         c.font = { bold: true };
@@ -5124,7 +5269,7 @@ const lookupIdCode = (componentName, fallbackProps) => {
       ws.addRow([]);
 
       // ---- Data table ----
-      const header = ws.addRow(["Tag", "ID Code", "Component", "In Stock", "Inventory"]);
+      const header = ws.addRow(["Tag", "ID Code", "Component", "In Stock", "Inventory", "Unity Price"]);
       header.font = { bold: true };
       header.alignment = { vertical: "middle" };
       header.eachCell((cell) => {
@@ -5178,9 +5323,14 @@ groups.forEach((g, gi) => {
       r.inventory === null || typeof r.inventory === "undefined"
         ? ""
         : Number(r.inventory),
+      r.unityPrice === null || typeof r.unityPrice === "undefined"
+        ? ""
+        : Number(r.unityPrice),
     ]);
     row.getCell(4).numFmt = "0";
     row.getCell(5).numFmt = "0";
+    // Currency format (GBP) for Unity Price
+    row.getCell(6).numFmt = "£#,##0.00";
     row.eachCell((cell) => {
       cell.border = {
         top: { style: "thin", color: { argb: "FFEEEEEE" } },
@@ -5190,6 +5340,22 @@ groups.forEach((g, gi) => {
       };
       cell.alignment = { vertical: "middle", wrapText: true };
     });
+
+    // If Inventory differs from In Stock, make the Inventory number red (Excel only)
+    const invCell = row.getCell(5);
+    const invVal = invCell.value;
+    const invNum = typeof invVal === "number" ? invVal : Number(invVal);
+    const stockNum = Number(r.inStock) || 0;
+    if (
+      invVal !== "" &&
+      invVal !== null &&
+      typeof invVal !== "undefined" &&
+      Number.isFinite(invNum) &&
+      Number.isFinite(stockNum) &&
+      invNum !== stockNum
+    ) {
+      invCell.font = { ...(invCell.font || {}), color: { argb: "FFDC2626" } };
+    }
   }
 
   // blank row between tag groups (except after last)
@@ -5199,11 +5365,12 @@ groups.forEach((g, gi) => {
 });
 
       ws.columns = [
-        { width: 18 },
-        { width: 14 },
-        { width: 44 },
-        { width: 12 },
-        { width: 12 },
+        { width: 18 }, // Tag
+        { width: 14 }, // ID Code
+        { width: 44 }, // Component
+        { width: 12 }, // In Stock
+        { width: 12 }, // Inventory
+        { width: 14 }, // Unity Price
       ];
 
       // Freeze the meta rows + header row
