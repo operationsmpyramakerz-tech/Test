@@ -4109,7 +4109,9 @@ app.get(
         startCursor = stockResponse.next_cursor;
       }
 
-      res.json(allStock);
+      // Filter: return only rows that have a positive In Stock value
+      const filteredStock = (allStock || []).filter((it) => Number(it.quantity) > 0);
+      res.json(filteredStock);
     } catch (error) {
       console.error("Error fetching stock data:", error.body || error);
       res
@@ -4217,9 +4219,12 @@ app.get(
         startCursor = stockResponse.next_cursor;
       }
 
+      // Filter: include only items that have a positive In Stock value
+      const filteredStockForPdf = (allStock || []).filter((it) => Number(it.quantity) > 0);
+
       // ===== Grouping =====
       const groupsMap = new Map();
-      (allStock || []).forEach((it) => {
+      (filteredStockForPdf || []).forEach((it) => {
         const name = it?.tag?.name || "Untagged";
         const color = it?.tag?.color || "default";
         const key = `${String(name).toLowerCase()}|${color}`;
@@ -4470,7 +4475,7 @@ app.get(
       const metaY = doc.y;
       const metaW = contentW1;
       const metaRowH = 30;
-      const metaH = metaRowH * 2;
+      const metaH = metaRowH; // one-row header table
       const metaColW = metaW / 2;
 
       // If the footer is very close (rare), start a new page.
@@ -4487,11 +4492,6 @@ app.get(
       doc
         .moveTo(metaX + metaColW, metaY)
         .lineTo(metaX + metaColW, metaY + metaH)
-        .strokeColor(COLORS.border)
-        .stroke();
-      doc
-        .moveTo(metaX, metaY + metaRowH)
-        .lineTo(metaX + metaW, metaY + metaRowH)
         .strokeColor(COLORS.border)
         .stroke();
 
@@ -4511,15 +4511,6 @@ app.get(
 
       drawMetaCell("School", String(schoolName || "—"), metaX, metaY, metaColW);
       drawMetaCell("Date", formatDateTime(createdAt), metaX + metaColW, metaY, metaColW);
-      drawMetaCell("Team member", teamMember, metaX, metaY + metaRowH, metaColW);
-      drawMetaCell(
-        "Prepared by (Operations)",
-        preparedBy,
-        metaX + metaColW,
-        metaY + metaRowH,
-        metaColW,
-      );
-
       doc.y = metaY + metaH + 18;
 
       // ===== Grouped table layout =====
