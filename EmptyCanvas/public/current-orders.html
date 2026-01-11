@@ -144,7 +144,13 @@
 <main class="container-full-width">
 <section class="card" id="current-orders">
 <div class="co-cards" id="orders-list">
-<p><i class="loading-icon" data-feather="loader"></i> Loading orders...</p>
+  <div class="modern-loading" role="status" aria-live="polite">
+    <div class="modern-loading__spinner" aria-hidden="true"></div>
+    <div class="modern-loading__text">
+      Loading orders
+      <span class="modern-loading__dots" aria-hidden="true"><span></span><span></span><span></span></span>
+    </div>
+  </div>
 </div>
 </section>
 </main>

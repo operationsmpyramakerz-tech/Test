@@ -144,7 +144,13 @@
   <!-- Orders list (Current Orders card style) -->
   <section class="card">
     <div class="co-cards" id="requested-list">
-      <p><i class="loading-icon" data-feather="loader"></i> Loading requested orders...</p>
+      <div class="modern-loading" role="status" aria-live="polite">
+        <div class="modern-loading__spinner" aria-hidden="true"></div>
+        <div class="modern-loading__text">
+          Loading requested orders
+          <span class="modern-loading__dots" aria-hidden="true"><span></span><span></span><span></span></span>
+        </div>
+      </div>
     </div>
   </section>
 </main>
