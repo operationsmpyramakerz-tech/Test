@@ -2285,6 +2285,7 @@ app.post(
         try {
           const p = await notion.pages.retrieve({ page_id: productPageId });
           const name = p.properties?.Name?.title?.[0]?.plain_text || "Unknown";
+          const idCode = _extractIdCodeFromProps(p.properties || {});
           const unitPrice =
             parseNumberProp(p.properties?.["Unity Price"]) ??
             parseNumberProp(p.properties?.["Unit price"]) ??
@@ -2306,11 +2307,11 @@ app.post(
             }
           } catch {}
           if (!url) url = p.url || null;
-          const info = { name, unitPrice, url };
+          const info = { name, idCode, unitPrice, url };
           productCache.set(productPageId, info);
           return info;
         } catch {
-          const info = { name: "Unknown", unitPrice: null, url: null };
+          const info = { name: "Unknown", idCode: null, unitPrice: null, url: null };
           productCache.set(productPageId, info);
           return info;
         }
@@ -2373,6 +2374,7 @@ app.post(
         grandQty += Number(qty) || 0;
 
         rows.push({
+          idCode: prod.idCode || "",
           component: prod.name,
           qty,
           reason,
@@ -2570,6 +2572,7 @@ app.post(
         try {
           const p = await notion.pages.retrieve({ page_id: productPageId });
           const name = p.properties?.Name?.title?.[0]?.plain_text || "Unknown";
+          const idCode = _extractIdCodeFromProps(p.properties || {});
           const unitPrice =
             parseNumberProp(p.properties?.["Unity Price"]) ??
             parseNumberProp(p.properties?.["Unit price"]) ??
@@ -2595,11 +2598,11 @@ app.post(
             }
           } catch {}
           if (!url) url = p.url || null;
-          const info = { name, unitPrice, url };
+          const info = { name, idCode, unitPrice, url };
           productCache.set(productPageId, info);
           return info;
         } catch {
-          const info = { name: "Unknown", unitPrice: null, url: null };
+          const info = { name: "Unknown", idCode: null, unitPrice: null, url: null };
           productCache.set(productPageId, info);
           return info;
         }
@@ -2623,6 +2626,7 @@ app.post(
       // Build rows
       const rows = [];
       let grandTotal = 0;
+      let grandQty = 0;
       for (const p of pages) {
         const props = p.properties || {};
         const reason = props.Reason?.title?.[0]?.plain_text || "";
@@ -2652,8 +2656,10 @@ app.post(
         const unit = Number(prod.unitPrice) || 0;
         const total = (Number(qty) || 0) * unit;
         grandTotal += total;
+        grandQty += Number(qty) || 0;
 
         rows.push({
+          idCode: prod.idCode || "",
           component: prod.name,
           qty: Number(qty) || 0,
           reason,
@@ -2668,21 +2674,87 @@ app.post(
       wb.creator = "Operations Hub";
       const ws = wb.addWorksheet("Order");
 
-      // Header (key-value)
-      ws.addRow(["Order ID", orderIdRange]);
-      ws.addRow(["Date", createdAt.toLocaleString("en-US")]);
-      ws.addRow(["Team member", teamMember]);
-      ws.addRow(["Total cost", grandTotal]);
+      const formatDateTime = (date) => {
+        try {
+          const d = date instanceof Date ? date : new Date(date);
+          if (Number.isNaN(d.getTime())) return String(date || "-");
+          return d.toLocaleString("en-GB", {
+            day: "2-digit",
+            month: "short",
+            year: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+        } catch {
+          return String(date || "-");
+        }
+      };
+
+      const borderThin = {
+        top: { style: "thin", color: { argb: "FFDDDDDD" } },
+        left: { style: "thin", color: { argb: "FFDDDDDD" } },
+        bottom: { style: "thin", color: { argb: "FFDDDDDD" } },
+        right: { style: "thin", color: { argb: "FFDDDDDD" } },
+      };
+      const borderLight = {
+        top: { style: "thin", color: { argb: "FFEEEEEE" } },
+        left: { style: "thin", color: { argb: "FFEEEEEE" } },
+        bottom: { style: "thin", color: { argb: "FFEEEEEE" } },
+        right: { style: "thin", color: { argb: "FFEEEEEE" } },
+      };
+
+      // ---- Meta small table (top) ----
+      ws.addRow(["Order ID", orderIdRange, "Date", formatDateTime(createdAt)]);
+      ws.addRow([
+        "Team member",
+        String(teamMember || ""),
+        "Prepared by (Operations)",
+        String(req.session?.username || "—"),
+      ]);
+      ws.addRow([
+        "Total quantity",
+        Number(grandQty) || 0,
+        "Estimate total",
+        Number(grandTotal) || 0,
+      ]);
+
+      // Style meta table A1:D3
+      for (let r = 1; r <= 3; r++) {
+        const row = ws.getRow(r);
+        row.height = 20;
+        for (let c = 1; c <= 4; c++) {
+          const cell = row.getCell(c);
+          cell.border = borderThin;
+          cell.alignment = {
+            vertical: "middle",
+            horizontal: "left",
+            wrapText: true,
+          };
+        }
+        // label cells
+        [1, 3].forEach((c) => {
+          const cell = row.getCell(c);
+          cell.font = { bold: true };
+          cell.fill = {
+            type: "pattern",
+            pattern: "solid",
+            fgColor: { argb: "FFEFEFEF" },
+          };
+        });
+        // value cells
+        [2, 4].forEach((c) => {
+          const cell = row.getCell(c);
+          cell.font = { bold: true };
+        });
+      }
+      ws.getRow(3).getCell(2).numFmt = "0";
+      ws.getRow(3).getCell(4).numFmt = '"£"#,##0.00';
+
       ws.addRow([]);
 
-      // Style header
-      for (let r = 1; r <= 4; r++) {
-        ws.getRow(r).getCell(1).font = { bold: true };
-      }
-      ws.getRow(4).getCell(2).numFmt = '"£"#,##0.00';
-
-      // Table header
+      // ---- Data table ----
       const header = ws.addRow([
+        "ID Code",
         "Component",
         "Quantity",
         "Reason",
@@ -2698,45 +2770,51 @@ app.post(
           pattern: "solid",
           fgColor: { argb: "FFEFEFEF" },
         };
-        cell.border = {
-          top: { style: "thin", color: { argb: "FFDDDDDD" } },
-          left: { style: "thin", color: { argb: "FFDDDDDD" } },
-          bottom: { style: "thin", color: { argb: "FFDDDDDD" } },
-          right: { style: "thin", color: { argb: "FFDDDDDD" } },
-        };
+        cell.border = borderThin;
       });
 
-      // Data rows
       for (const row of rows) {
         const r = ws.addRow([
+          row.idCode || "",
           row.component,
           row.qty,
           row.reason,
           row.link || "",
-          row.unit || "",
-          row.total || "",
+          row.unit === null || typeof row.unit === "undefined" ? "" : Number(row.unit),
+          row.total === null || typeof row.total === "undefined" ? "" : Number(row.total),
         ]);
 
         // hyperlink (show the actual URL text, pointing to the product website URL)
         if (row.link) {
-          r.getCell(4).value = { text: row.link, hyperlink: row.link };
-          r.getCell(4).font = { color: { argb: "FF2563EB" }, underline: true };
+          r.getCell(5).value = { text: row.link, hyperlink: row.link };
+          r.getCell(5).font = { color: { argb: "FF2563EB" }, underline: true };
         }
 
-        // currency formats
-        r.getCell(5).numFmt = '"£"#,##0.00';
+        // formats
+        r.getCell(3).numFmt = "0";
         r.getCell(6).numFmt = '"£"#,##0.00';
+        r.getCell(7).numFmt = '"£"#,##0.00';
+
+        // borders / alignment
+        r.eachCell((cell) => {
+          cell.border = borderLight;
+          cell.alignment = { vertical: "middle", wrapText: true };
+        });
       }
 
       // Column widths
       ws.columns = [
-        { width: 28 },
+        { width: 14 },
+        { width: 32 },
         { width: 10 },
         { width: 24 },
         { width: 48 },
         { width: 12 },
         { width: 12 },
       ];
+
+      // Freeze meta rows + blank row + header row (row 5)
+      ws.views = [{ state: "frozen", ySplit: 5 }];
 
       const safeName = String(orderIdRange || "order")
         .replace(/[\\/:*?"<>|]/g, "-")
@@ -3999,6 +4077,80 @@ app.post(
 );
 
 // ===== Stocktaking data (JSON) — requires Stocktaking =====
+
+// ===== Helpers: Stocktaking / Products "ID code" extraction (Notion) =====
+function _propInsensitive(props = {}, name = "") {
+  const target = String(name || "").trim().toLowerCase();
+  if (!target) return null;
+  for (const [k, v] of Object.entries(props || {})) {
+    if (String(k || "").trim().toLowerCase() === target) return v;
+  }
+  return null;
+}
+
+function _extractPropText(prop) {
+  try {
+    if (!prop) return null;
+    if (prop.type === "unique_id" && prop.unique_id && typeof prop.unique_id.number === "number") {
+      const prefix = prop.unique_id.prefix ? String(prop.unique_id.prefix).trim() : "";
+      const n = prop.unique_id.number;
+      return prefix ? `${prefix}-${n}` : String(n);
+    }
+    if (prop.type === "rich_text") {
+      const t = (prop.rich_text || []).map((r) => r?.plain_text || "").join("").trim();
+      return t || null;
+    }
+    if (prop.type === "title") {
+      const t = (prop.title || []).map((r) => r?.plain_text || "").join("").trim();
+      return t || null;
+    }
+    if (prop.type === "number" && (prop.number === 0 || typeof prop.number === "number")) {
+      return String(prop.number);
+    }
+    if (prop.type === "select") return prop.select?.name || null;
+    if (prop.type === "formula") {
+      if (prop.formula?.type === "string") {
+        const t = String(prop.formula.string || "").trim();
+        return t || null;
+      }
+      if (prop.formula?.type === "number" && typeof prop.formula.number === "number") {
+        return String(prop.formula.number);
+      }
+    }
+  } catch {}
+  return null;
+}
+
+function _extractIdCodeFromProps(props = {}) {
+  // Prefer explicit property names
+  const candidates = [
+    "ID code",
+    "ID Code",
+    "Id code",
+    "ID",
+    "Code",
+    "Component Code",
+    "Item Code",
+    "SKU",
+  ];
+
+  for (const name of candidates) {
+    const p = _propInsensitive(props, name) || props?.[name];
+    const t = _extractPropText(p);
+    if (t) return t;
+  }
+
+  // Fallback: first unique_id on the page
+  for (const v of Object.values(props || {})) {
+    if (v?.type === "unique_id") {
+      const t = _extractPropText(v);
+      if (t) return t;
+    }
+  }
+
+  return null;
+}
+
 app.get(
   "/api/stock",
   requireAuth,
@@ -4066,6 +4218,7 @@ app.get(
               "Untitled";
 
             const quantity = firstDefinedNumber(props[schoolName]);
+
             const oneKitQuantity = firstDefinedNumber(
               props["One Kit Quantity"],
               props["One Kit Qty"],
@@ -4073,6 +4226,8 @@ app.get(
               props["Kit Qty"],
               props["OneKitQuantity"],
             );
+
+            const idCode = _extractIdCodeFromProps(props);
 
             let tag = null;
             if (props.Tag?.select) {
@@ -4099,6 +4254,7 @@ app.get(
               name: componentName,
               quantity: Number(quantity) || 0,
               oneKitQuantity: Number(oneKitQuantity) || 0,
+              idCode,
               tag,
             };
           })
@@ -4122,12 +4278,17 @@ app.get(
 );
 
 // ===== Stocktaking PDF download — requires Stocktaking =====
-app.get(
+// Supports BOTH GET (empty inventory) and POST (inventory values from UI)
+app.all(
   "/api/stock/pdf",
   requireAuth,
   requirePage("Stocktaking"),
   async (req, res) => {
     try {
+      const inventoryMapRaw = req?.body?.inventory;
+      const inventoryMap =
+        inventoryMapRaw && typeof inventoryMapRaw === "object" ? inventoryMapRaw : {};
+
       const userResponse = await notion.databases.query({
         database_id: teamMembersDatabaseId,
         filter: { property: "Name", title: { equals: req.session.username } },
@@ -4185,6 +4346,15 @@ app.get(
 
             const quantity = firstDefinedNumber(props[schoolName]);
 
+            const idCode = _extractIdCodeFromProps(props);
+
+            // Inventory values come from the UI (POST body). If the key exists, allow 0.
+            let inventory = null;
+            if (inventoryMap && Object.prototype.hasOwnProperty.call(inventoryMap, page.id)) {
+              const n = Number(inventoryMap[page.id]);
+              if (Number.isFinite(n) && n >= 0) inventory = n;
+            }
+
             let tag = null;
             if (props.Tag?.select) {
               tag = {
@@ -4209,6 +4379,8 @@ app.get(
               id: page.id,
               name: componentName,
               quantity: Number(quantity) || 0,
+              idCode,
+              inventory,
               tag,
             };
           })
@@ -4516,9 +4688,10 @@ app.get(
       // ===== Grouped table layout =====
       const pageInnerWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
       const gap = 10;
-      const colInStockW = 90;
-      const colInvW = 110;
-      const colNameW = pageInnerWidth - colInStockW - colInvW - gap * 2;
+      const colCodeW = 90;
+      const colInStockW = 80;
+      const colInvW = 90;
+      const colNameW = pageInnerWidth - colCodeW - colInStockW - colInvW - gap * 3;
 
       const drawGroupHeader = (gName, pal, count, cont = false) => {
         const y = doc.y + 2;
@@ -4580,17 +4753,19 @@ app.get(
           .fillAndStroke();
         doc.fillColor(pal.text).font("Helvetica-Bold").fontSize(10);
 
-        doc.text("Component", doc.page.margins.left + 10, y + 5, {
-          width: colNameW,
-        });
+        const baseX = doc.page.margins.left + 10;
+        doc.text("ID Code", baseX, y + 5, { width: colCodeW });
 
-        const midX = doc.page.margins.left + 10 + colNameW + gap;
+        const compX = baseX + colCodeW + gap;
+        doc.text("Component", compX, y + 5, { width: colNameW });
+
+        const midX = compX + colNameW + gap;
         doc.text("In Stock", midX, y + 5, {
           width: colInStockW - 10,
           align: "right",
         });
 
-        const lastX = doc.page.margins.left + colNameW + gap + colInStockW + gap;
+        const lastX = midX + colInStockW + gap;
         doc.text("Inventory", lastX, y + 5, {
           width: colInvW - 10,
           align: "right",
@@ -4601,10 +4776,12 @@ app.get(
       };
 
       const drawRow = (item, pal, onNewPage) => {
+        const codeText = item?.idCode ? String(item.idCode) : "-";
+        const codeHeight = doc.heightOfString(codeText, { width: colCodeW });
         const nameHeight = doc.heightOfString(item.name || "-", {
           width: colNameW,
         });
-        const rowH = Math.max(18, nameHeight);
+        const rowH = Math.max(18, codeHeight, nameHeight);
 
         // Make sure the whole row fits above the signature footer
         ensureSpace(rowH + 8, onNewPage);
@@ -4612,11 +4789,13 @@ app.get(
         const y = doc.y;
 
         doc.font("Helvetica").fontSize(11).fillColor(COLORS.text);
-        doc.text(item.name || "-", doc.page.margins.left + 2, y, {
-          width: colNameW,
-        });
+        const baseX = doc.page.margins.left + 10;
+        doc.text(codeText, baseX, y, { width: colCodeW });
 
-        const midX = doc.page.margins.left + colNameW + gap;
+        const compX = baseX + colCodeW + gap;
+        doc.text(item.name || "-", compX, y, { width: colNameW });
+
+        const midX = compX + colNameW + gap;
         doc
           .fillColor(COLORS.text)
           .font("Helvetica")
@@ -4626,16 +4805,28 @@ app.get(
             align: "right",
           });
 
-        const lastX = doc.page.margins.left + colNameW + gap + colInStockW + gap;
+        const lastX = midX + colInStockW + gap;
 
-        // Blank inventory cell (draw a light underline so it can be filled manually)
-        const lineY = y + rowH - 2;
-        doc
-          .moveTo(lastX + 12, lineY)
-          .lineTo(lastX + colInvW - 18, lineY)
-          .strokeColor(COLORS.border)
-          .lineWidth(1)
-          .stroke();
+        // Inventory: if there is a value from the UI, print it; otherwise draw an underline.
+        const invHasValue = item.inventory !== null && typeof item.inventory !== "undefined";
+        if (invHasValue) {
+          doc
+            .fillColor(COLORS.text)
+            .font("Helvetica")
+            .fontSize(11)
+            .text(String(Number(item.inventory)), lastX, y, {
+              width: colInvW - 10,
+              align: "right",
+            });
+        } else {
+          const lineY = y + rowH - 2;
+          doc
+            .moveTo(lastX + 12, lineY)
+            .lineTo(lastX + colInvW - 18, lineY)
+            .strokeColor(COLORS.border)
+            .lineWidth(1)
+            .stroke();
+        }
 
         // Row separator
         doc
@@ -4670,6 +4861,233 @@ app.get(
     } catch (e) {
       console.error("PDF generation error:", e);
       res.status(500).json({ error: "Failed to generate PDF" });
+    }
+  },
+);
+
+// ===== Stocktaking Excel download — requires Stocktaking =====
+// Supports BOTH GET (empty inventory) and POST (inventory values from UI)
+app.all(
+  "/api/stock/excel",
+  requireAuth,
+  requirePage("Stocktaking"),
+  async (req, res) => {
+    try {
+      const inventoryMapRaw = req?.body?.inventory;
+      const inventoryMap =
+        inventoryMapRaw && typeof inventoryMapRaw === "object" ? inventoryMapRaw : {};
+
+      const userResponse = await notion.databases.query({
+        database_id: teamMembersDatabaseId,
+        filter: { property: "Name", title: { equals: req.session.username } },
+      });
+      if (userResponse.results.length === 0)
+        return res.status(404).json({ error: "User not found." });
+
+      const user = userResponse.results[0];
+      const schoolProp = user.properties.School || {};
+      const schoolName =
+        schoolProp?.select?.name ||
+        (Array.isArray(schoolProp?.rich_text) &&
+          schoolProp.rich_text[0]?.plain_text) ||
+        (Array.isArray(schoolProp?.title) && schoolProp.title[0]?.plain_text) ||
+        null;
+
+      if (!schoolName)
+        return res
+          .status(404)
+          .json({ error: "Could not determine school name for the user." });
+
+      const createdAt = new Date();
+      const formatDateTime = (date) => {
+        try {
+          const d = date instanceof Date ? date : new Date(date);
+          if (Number.isNaN(d.getTime())) return String(date || "-");
+          return d.toLocaleString("en-GB", {
+            day: "2-digit",
+            month: "short",
+            year: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+        } catch {
+          return String(date || "-");
+        }
+      };
+
+      const numberFrom = (prop) => {
+        if (!prop) return undefined;
+        if (typeof prop.number === "number") return prop.number;
+        if (prop.formula && typeof prop.formula.number === "number")
+          return prop.formula.number;
+        return undefined;
+      };
+      const firstDefinedNumber = (...props) => {
+        for (const p of props) {
+          const n = numberFrom(p);
+          if (typeof n === "number") return n;
+        }
+        return 0;
+      };
+
+      // Fetch stock rows
+      const allStock = [];
+      let hasMore = true;
+      let startCursor = undefined;
+      while (hasMore) {
+        const stockResponse = await notion.databases.query({
+          database_id: stocktakingDatabaseId,
+          start_cursor: startCursor,
+          sorts: [{ property: "Name", direction: "ascending" }],
+        });
+
+        const rows = (stockResponse.results || [])
+          .map((page) => {
+            const props = page.properties || {};
+            const componentName =
+              props.Name?.title?.[0]?.plain_text ||
+              props.Component?.title?.[0]?.plain_text ||
+              "Untitled";
+
+            const quantity = firstDefinedNumber(props[schoolName]);
+            const idCode = _extractIdCodeFromProps(props);
+
+            // Inventory values come from the UI (POST body). If the key exists, allow 0.
+            let inventory = null;
+            if (inventoryMap && Object.prototype.hasOwnProperty.call(inventoryMap, page.id)) {
+              const n = Number(inventoryMap[page.id]);
+              if (Number.isFinite(n) && n >= 0) inventory = n;
+            }
+
+            let tagName = "Untagged";
+            if (props.Tag?.select?.name) tagName = props.Tag.select.name;
+            else if (Array.isArray(props.Tag?.multi_select) && props.Tag.multi_select[0]?.name)
+              tagName = props.Tag.multi_select[0].name;
+            else if (Array.isArray(props.Tags?.multi_select) && props.Tags.multi_select[0]?.name)
+              tagName = props.Tags.multi_select[0].name;
+
+            return {
+              id: page.id,
+              tag: tagName,
+              idCode: idCode || "",
+              component: componentName,
+              inStock: Number(quantity) || 0,
+              inventory,
+            };
+          })
+          .filter(Boolean);
+
+        allStock.push(...rows);
+        hasMore = stockResponse.has_more;
+        startCursor = stockResponse.next_cursor;
+      }
+
+      const visibleRows = (allStock || []).filter((r) => Number(r.inStock) > 0);
+
+      const ExcelJS = require("exceljs");
+      const wb = new ExcelJS.Workbook();
+      wb.creator = "Operations Hub";
+      const ws = wb.addWorksheet("Stocktaking");
+
+      // ---- Meta small table (one row) ----
+      ws.addRow(["School", String(schoolName || "—"), "Date", formatDateTime(createdAt)]);
+      const metaRow = ws.getRow(1);
+      metaRow.height = 20;
+      // Style meta cells A1:D1
+      for (const col of [1, 2, 3, 4]) {
+        const cell = metaRow.getCell(col);
+        cell.border = {
+          top: { style: "thin", color: { argb: "FFDDDDDD" } },
+          left: { style: "thin", color: { argb: "FFDDDDDD" } },
+          bottom: { style: "thin", color: { argb: "FFDDDDDD" } },
+          right: { style: "thin", color: { argb: "FFDDDDDD" } },
+        };
+        cell.alignment = { vertical: "middle", horizontal: "left", wrapText: true };
+      }
+      // Label cells
+      [1, 3].forEach((col) => {
+        const c = metaRow.getCell(col);
+        c.font = { bold: true };
+        c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFEFEFEF" } };
+      });
+      // Value cells
+      [2, 4].forEach((col) => {
+        const c = metaRow.getCell(col);
+        c.font = { bold: true };
+      });
+
+      ws.addRow([]);
+
+      // ---- Data table ----
+      const header = ws.addRow(["Tag", "ID Code", "Component", "In Stock", "Inventory"]);
+      header.font = { bold: true };
+      header.alignment = { vertical: "middle" };
+      header.eachCell((cell) => {
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FFF7E8F1" }, // light pink-ish to match UI accents
+        };
+        cell.border = {
+          top: { style: "thin", color: { argb: "FFDDDDDD" } },
+          left: { style: "thin", color: { argb: "FFDDDDDD" } },
+          bottom: { style: "thin", color: { argb: "FFDDDDDD" } },
+          right: { style: "thin", color: { argb: "FFDDDDDD" } },
+        };
+      });
+
+      for (const r of visibleRows) {
+        const row = ws.addRow([
+          r.tag || "Untagged",
+          r.idCode || "",
+          r.component || "",
+          Number(r.inStock) || 0,
+          r.inventory === null || typeof r.inventory === "undefined" ? "" : Number(r.inventory),
+        ]);
+        row.getCell(4).numFmt = "0";
+        row.getCell(5).numFmt = "0";
+        row.eachCell((cell) => {
+          cell.border = {
+            top: { style: "thin", color: { argb: "FFEEEEEE" } },
+            left: { style: "thin", color: { argb: "FFEEEEEE" } },
+            bottom: { style: "thin", color: { argb: "FFEEEEEE" } },
+            right: { style: "thin", color: { argb: "FFEEEEEE" } },
+          };
+          cell.alignment = { vertical: "middle", wrapText: true };
+        });
+      }
+
+      ws.columns = [
+        { width: 18 },
+        { width: 14 },
+        { width: 44 },
+        { width: 12 },
+        { width: 12 },
+      ];
+
+      // Freeze the meta rows + header row
+      ws.views = [{ state: "frozen", ySplit: 3 }];
+
+      const safeSchool = String(schoolName || "school")
+        .replace(/[\\/:*?"<>|]/g, "-")
+        .replace(/\s+/g, "_")
+        .slice(0, 60);
+      const fileName = `stocktaking_${safeSchool}.xlsx`;
+
+      const buf = await wb.xlsx.writeBuffer();
+      res.setHeader(
+        "Content-Type",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      );
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${fileName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+      );
+      res.setHeader("Cache-Control", "no-store");
+      res.send(Buffer.from(buf));
+    } catch (e) {
+      console.error("Stocktaking Excel generation error:", e.body || e);
+      res.status(500).json({ error: "Failed to export Excel" });
     }
   },
 );

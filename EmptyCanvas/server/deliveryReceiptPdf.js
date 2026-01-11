@@ -31,7 +31,7 @@ function formatDateTime(date) {
  * @param {Date} params.createdAt
  * @param {string} params.teamMember
  * @param {string} params.preparedBy
- * @param {Array<{component:string,reason:string,qty:number,unit:number,total:number}>} params.rows
+ * @param {Array<{idCode?:string,component:string,reason:string,qty:number,unit:number,total:number}>} params.rows
  * @param {number} params.grandQty
  * @param {number} params.grandTotal
  * @param {import('stream').Writable} stream
@@ -160,13 +160,16 @@ function pipeDeliveryReceiptPDF(
   const cellPadX = 8;
 
   // column widths (sum == tableW)
-  const colWComponent = Math.round(tableW * 0.40);
-  const colWReason = Math.round(tableW * 0.22);
-  const colWQty = Math.round(tableW * 0.10);
-  const colWUnit = Math.round(tableW * 0.14);
-  const colWTotal = tableW - colWComponent - colWReason - colWQty - colWUnit;
+  // Added "ID Code" column as requested
+  const colWIdCode = Math.round(tableW * 0.14);
+  const colWComponent = Math.round(tableW * 0.32);
+  const colWReason = Math.round(tableW * 0.20);
+  const colWQty = Math.round(tableW * 0.08);
+  const colWUnit = Math.round(tableW * 0.13);
+  const colWTotal = tableW - colWIdCode - colWComponent - colWReason - colWQty - colWUnit;
 
   const columns = [
+    { key: "idCode", label: "ID Code", width: colWIdCode, align: "left" },
     { key: "component", label: "Component", width: colWComponent, align: "left" },
     { key: "reason", label: "Reason", width: colWReason, align: "left" },
     { key: "qty", label: "Qty", width: colWQty, align: "right" },
@@ -218,6 +221,7 @@ function pipeDeliveryReceiptPDF(
 
   safeRows.forEach((r, idx) => {
     const rowData = {
+      idCode: String(r.idCode || ""),
       component: String(r.component || ""),
       reason: String(r.reason || ""),
       qty: String(Number(r.qty) || 0),
@@ -225,9 +229,10 @@ function pipeDeliveryReceiptPDF(
       total: moneyGBP(r.total),
     };
 
+    const hId = doc.heightOfString(rowData.idCode, { width: colWIdCode - cellPadX * 2 });
     const hComponent = doc.heightOfString(rowData.component, { width: colWComponent - cellPadX * 2 });
     const hReason = doc.heightOfString(rowData.reason, { width: colWReason - cellPadX * 2 });
-    const rowH = Math.max(20, hComponent, hReason) + 8;
+    const rowH = Math.max(20, hId, hComponent, hReason) + 8;
 
     ensureSpace(rowH + 6, {
       onNewPage: () => {
