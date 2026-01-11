@@ -4848,12 +4848,20 @@ app.all(
       const ensureSpace = (needH, onNewPage) => {
         const bottom = contentBottomY();
         if (doc.y + needH > bottom) {
+          // NOTE: new pages can be added either by our own logic or internally by PDFKit.
+          // We attach a `pageAdded` handler (below) to draw the header + signature on every page.
+          // So here we only add the page and then let the callback redraw the group headers.
           doc.addPage();
-          drawPageHeader({ compact: true });
-          drawSignatureFooter();
           onNewPage?.();
         }
       };
+
+      // Draw header + signature on every NEW page (including pages auto-added by PDFKit)
+      // so the footer is visible on each page, not just the last one.
+      doc.on("pageAdded", () => {
+        drawPageHeader({ compact: true });
+        drawSignatureFooter();
+      });
 
       // ===== Page 1 header + footer =====
       drawPageHeader({ compact: false });
@@ -5199,15 +5207,22 @@ app.all(
             }
 
             let tagName = "Untagged";
-            if (props.Tag?.select?.name) tagName = props.Tag.select.name;
-            else if (Array.isArray(props.Tag?.multi_select) && props.Tag.multi_select[0]?.name)
+            let tagColor = "default";
+            if (props.Tag?.select?.name) {
+              tagName = props.Tag.select.name;
+              tagColor = props.Tag.select.color || "default";
+            } else if (Array.isArray(props.Tag?.multi_select) && props.Tag.multi_select[0]?.name) {
               tagName = props.Tag.multi_select[0].name;
-            else if (Array.isArray(props.Tags?.multi_select) && props.Tags.multi_select[0]?.name)
+              tagColor = props.Tag.multi_select[0].color || "default";
+            } else if (Array.isArray(props.Tags?.multi_select) && props.Tags.multi_select[0]?.name) {
               tagName = props.Tags.multi_select[0].name;
+              tagColor = props.Tags.multi_select[0].color || "default";
+            }
 
             return {
               id: page.id,
               tag: tagName,
+              tagColor,
               idCode: idCode || "",
               component: componentName,
               inStock: Number(quantity) || 0,
@@ -5231,19 +5246,15 @@ app.all(
 
       // ---- Meta small table (one row) ----
       // Make the Date cell full-width by merging across the remaining columns.
-      ws.addRow([
-        "School",
-        String(schoolName || "—"),
-        "Date",
-        formatDateTime(createdAt),
-        "",
-        "",
-      ]);
-      ws.mergeCells("D1:F1");
+      // Columns layout (Excel):
+      // A: ID Code | B: Component | C: In Stock | D: Inventory | E: Unity Price
+      // Meta row uses: [School, <school>, Date, <date>, ""] and merges D1:E1.
+      ws.addRow(["School", String(schoolName || "—"), "Date", formatDateTime(createdAt), ""]);
+      ws.mergeCells("D1:E1");
       const metaRow = ws.getRow(1);
       metaRow.height = 20;
-      // Style meta cells A1:F1
-      for (const col of [1, 2, 3, 4, 5, 6]) {
+      // Style meta cells A1:E1
+      for (const col of [1, 2, 3, 4, 5]) {
         const cell = metaRow.getCell(col);
         cell.border = {
           top: { style: "thin", color: { argb: "FFDDDDDD" } },
@@ -5268,104 +5279,136 @@ app.all(
 
       ws.addRow([]);
 
-      // ---- Data table ----
-      const header = ws.addRow(["Tag", "ID Code", "Component", "In Stock", "Inventory", "Unity Price"]);
-      header.font = { bold: true };
-      header.alignment = { vertical: "middle" };
-      header.eachCell((cell) => {
-        cell.fill = {
-          type: "pattern",
-          pattern: "solid",
-          fgColor: { argb: "FFF7E8F1" }, // light pink-ish to match UI accents
-        };
-        cell.border = {
-          top: { style: "thin", color: { argb: "FFDDDDDD" } },
-          left: { style: "thin", color: { argb: "FFDDDDDD" } },
-          bottom: { style: "thin", color: { argb: "FFDDDDDD" } },
-          right: { style: "thin", color: { argb: "FFDDDDDD" } },
-        };
+      // ---- Excel tag palette (match PDF/UI colors) ----
+      const excelPalette = {
+        default: { fill: "FFF3F4F6", border: "FFE5E7EB", text: "FF111827" },
+        gray: { fill: "FFF3F4F6", border: "FFE5E7EB", text: "FF374151" },
+        brown: { fill: "FFEFEBE9", border: "FFD7CCC8", text: "FF4E342E" },
+        orange: { fill: "FFFFF7ED", border: "FFFED7AA", text: "FF9A3412" },
+        yellow: { fill: "FFFEFCE8", border: "FFFDE68A", text: "FF854D0E" },
+        green: { fill: "FFECFDF5", border: "FFA7F3D0", text: "FF065F46" },
+        blue: { fill: "FFEFF6FF", border: "FFBFDBFE", text: "FF1E40AF" },
+        purple: { fill: "FFF5F3FF", border: "FFDDD6FE", text: "FF5B21B6" },
+        pink: { fill: "FFFDF2F8", border: "FFFBCFE8", text: "FF9D174D" },
+        red: { fill: "FFFEF2F2", border: "FFFECACA", text: "FF991B1B" },
+      };
+      const getExcelPal = (c = "default") => excelPalette[c] || excelPalette.default;
+
+      // ---- Group by Tag (with color), render each tag as its own colored section (like PDF) ----
+      const groupsMap = new Map();
+      (visibleRows || []).forEach((r) => {
+        const tagName = String(r.tag || "Untagged").trim() || "Untagged";
+        const tagColor = String(r.tagColor || "default") || "default";
+        const key = `${_normNameKey(tagName)}|${tagColor}`;
+        if (!groupsMap.has(key)) groupsMap.set(key, { name: tagName, color: tagColor, items: [] });
+        groupsMap.get(key).items.push(r);
       });
 
-// Sort by Tag (ascending) and put "Untagged" at the end.
-// Also: insert a blank row between different tag groups (as requested).
-const groupsMap = new Map();
-(visibleRows || []).forEach((r) => {
-  const tagName = String(r.tag || "Untagged").trim() || "Untagged";
-  const key = _normNameKey(tagName);
-  if (!groupsMap.has(key)) groupsMap.set(key, { name: tagName, items: [] });
-  groupsMap.get(key).items.push(r);
-});
+      let groups = Array.from(groupsMap.values()).sort((a, b) =>
+        String(a.name).localeCompare(String(b.name)),
+      );
+      const untaggedGroups = groups.filter(
+        (g) => _normNameKey(g.name) === "untagged" || String(g.name).trim() === "-",
+      );
+      groups = groups
+        .filter(
+          (g) => !(_normNameKey(g.name) === "untagged" || String(g.name).trim() === "-"),
+        )
+        .concat(untaggedGroups);
 
-let groups = Array.from(groupsMap.values()).sort((a, b) =>
-  String(a.name).localeCompare(String(b.name)),
-);
-const untaggedGroups = groups.filter(
-  (g) => _normNameKey(g.name) === "untagged" || String(g.name).trim() === "-",
-);
-groups = groups
-  .filter(
-    (g) =>
-      !(_normNameKey(g.name) === "untagged" || String(g.name).trim() === "-"),
-  )
-  .concat(untaggedGroups);
-
-groups.forEach((g, gi) => {
-  const items = (g.items || []).slice().sort((a, b) =>
-    String(a.component || "").localeCompare(String(b.component || "")),
-  );
-
-  for (const r of items) {
-    const row = ws.addRow([
-      r.tag || "Untagged",
-      r.idCode || "",
-      r.component || "",
-      Number(r.inStock) || 0,
-      r.inventory === null || typeof r.inventory === "undefined"
-        ? ""
-        : Number(r.inventory),
-      r.unityPrice === null || typeof r.unityPrice === "undefined"
-        ? ""
-        : Number(r.unityPrice),
-    ]);
-    row.getCell(4).numFmt = "0";
-    row.getCell(5).numFmt = "0";
-    // Currency format (GBP) for Unity Price
-    row.getCell(6).numFmt = "£#,##0.00";
-    row.eachCell((cell) => {
-      cell.border = {
-        top: { style: "thin", color: { argb: "FFEEEEEE" } },
-        left: { style: "thin", color: { argb: "FFEEEEEE" } },
-        bottom: { style: "thin", color: { argb: "FFEEEEEE" } },
-        right: { style: "thin", color: { argb: "FFEEEEEE" } },
+      const borderFor = (argb) => ({ style: "thin", color: { argb } });
+      const lightGridBorder = {
+        top: borderFor("FFEEEEEE"),
+        left: borderFor("FFEEEEEE"),
+        bottom: borderFor("FFEEEEEE"),
+        right: borderFor("FFEEEEEE"),
       };
-      cell.alignment = { vertical: "middle", wrapText: true };
-    });
 
-    // If Inventory differs from In Stock, make the Inventory number red (Excel only)
-    const invCell = row.getCell(5);
-    const invVal = invCell.value;
-    const invNum = typeof invVal === "number" ? invVal : Number(invVal);
-    const stockNum = Number(r.inStock) || 0;
-    if (
-      invVal !== "" &&
-      invVal !== null &&
-      typeof invVal !== "undefined" &&
-      Number.isFinite(invNum) &&
-      Number.isFinite(stockNum) &&
-      invNum !== stockNum
-    ) {
-      invCell.font = { ...(invCell.font || {}), color: { argb: "FFDC2626" } };
-    }
-  }
+      groups.forEach((g, gi) => {
+        const pal = getExcelPal(g.color);
+        const items = (g.items || []).slice().sort((a, b) =>
+          String(a.component || "").localeCompare(String(b.component || "")),
+        );
 
-  // blank row between tag groups (except after last)
-  if (gi !== groups.length - 1) {
-    ws.addRow([]);
-  }
-});
+        // Tag bar row (like the PDF "Tag" header)
+        const tagRow = ws.addRow(["Tag", g.name, "", "", `${items.length} items`]);
+        ws.mergeCells(`B${tagRow.number}:D${tagRow.number}`);
+        tagRow.height = 18;
+        tagRow.eachCell((cell, colNumber) => {
+          cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: pal.fill } };
+          cell.border = {
+            top: borderFor(pal.border),
+            left: borderFor(pal.border),
+            bottom: borderFor(pal.border),
+            right: borderFor(pal.border),
+          };
+          cell.alignment = { vertical: "middle", wrapText: true };
+          // right-align the count cell
+          if (colNumber === 5) cell.alignment = { vertical: "middle", horizontal: "right" };
+        });
+        // Style tag row text
+        tagRow.getCell(1).font = { bold: true, color: { argb: "FF6B7280" } }; // muted
+        tagRow.getCell(2).font = { bold: true, color: { argb: pal.text } };
+        tagRow.getCell(5).font = { bold: true, color: { argb: "FF111827" } };
+
+        // Table header row (colored per tag)
+        const headRow = ws.addRow(["ID Code", "Component", "In Stock", "Inventory", "Unity Price"]);
+        headRow.height = 18;
+        headRow.font = { bold: true, color: { argb: pal.text } };
+        headRow.alignment = { vertical: "middle" };
+        headRow.eachCell((cell) => {
+          cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: pal.fill } };
+          cell.border = {
+            top: borderFor(pal.border),
+            left: borderFor(pal.border),
+            bottom: borderFor(pal.border),
+            right: borderFor(pal.border),
+          };
+        });
+
+        // Rows
+        for (const r of items) {
+          const row = ws.addRow([
+            r.idCode || "",
+            r.component || "",
+            Number(r.inStock) || 0,
+            r.inventory === null || typeof r.inventory === "undefined" ? "" : Number(r.inventory),
+            r.unityPrice === null || typeof r.unityPrice === "undefined" ? "" : Number(r.unityPrice),
+          ]);
+
+          row.getCell(3).numFmt = "0";
+          row.getCell(4).numFmt = "0";
+          row.getCell(5).numFmt = "£#,##0.00";
+
+          row.eachCell((cell) => {
+            cell.border = lightGridBorder;
+            cell.alignment = { vertical: "middle", wrapText: true };
+          });
+
+          // If Inventory differs from In Stock, make the Inventory number red
+          const invCell = row.getCell(4);
+          const invVal = invCell.value;
+          const invNum = typeof invVal === "number" ? invVal : Number(invVal);
+          const stockNum = Number(r.inStock) || 0;
+          if (
+            invVal !== "" &&
+            invVal !== null &&
+            typeof invVal !== "undefined" &&
+            Number.isFinite(invNum) &&
+            Number.isFinite(stockNum) &&
+            invNum !== stockNum
+          ) {
+            invCell.font = { ...(invCell.font || {}), color: { argb: "FFDC2626" } };
+          }
+        }
+
+        // Blank row between tags (like the PDF spacing)
+        if (gi !== groups.length - 1) {
+          ws.addRow([]);
+        }
+      });
 
       ws.columns = [
-        { width: 18 }, // Tag
         { width: 14 }, // ID Code
         { width: 44 }, // Component
         { width: 12 }, // In Stock
@@ -5373,8 +5416,8 @@ groups.forEach((g, gi) => {
         { width: 14 }, // Unity Price
       ];
 
-      // Freeze the meta rows + header row
-      ws.views = [{ state: "frozen", ySplit: 3 }];
+      // Freeze the meta row (and the blank spacer row)
+      ws.views = [{ state: "frozen", ySplit: 2 }];
 
       const safeSchool = String(schoolName || "school")
         .replace(/[\\/:*?"<>|]/g, "-")
