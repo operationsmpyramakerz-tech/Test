@@ -6,6 +6,11 @@ document.addEventListener('DOMContentLoaded', function() {
 
   const norm = (s) => String(s || '').toLowerCase().trim();
 
+  const isPositiveQty = (item) => {
+    const n = Number(item?.quantity);
+    return Number.isFinite(n) && n > 0;
+  };
+
   // ألوان Notion للـ select
   const colorVars = (color = 'default') => {
     switch (color) {
@@ -60,7 +65,9 @@ document.addEventListener('DOMContentLoaded', function() {
   const renderGroups = (rows) => {
     groupsContainer.innerHTML = '';
 
-    if (!rows || rows.length === 0) {
+    const visibleRows = (rows || []).filter(isPositiveQty);
+
+    if (!visibleRows || visibleRows.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'empty-block';
       empty.textContent = 'No results found.';
@@ -68,7 +75,7 @@ document.addEventListener('DOMContentLoaded', function() {
       return;
     }
 
-    const groups = groupByTag(rows);
+    const groups = groupByTag(visibleRows);
     const frag = document.createDocumentFragment();
 
     groups.forEach(group => {
@@ -126,8 +133,17 @@ document.addEventListener('DOMContentLoaded', function() {
 
           const tdInventory = document.createElement('td');
           tdInventory.className = 'col-num col-inventory';
-          // Blank cell for manual inventory counting / writing
-          tdInventory.innerHTML = '&nbsp;';
+
+          // Editable input for manual inventory counting
+          const invInput = document.createElement('input');
+          invInput.type = 'number';
+          invInput.min = '0';
+          invInput.step = '1';
+          invInput.className = 'inventory-input';
+          invInput.setAttribute('inputmode', 'numeric');
+          invInput.setAttribute('aria-label', `Inventory for ${item.name || 'item'}`);
+          invInput.value = '';
+          tdInventory.appendChild(invInput);
 
           tr.appendChild(tdName);
           tr.appendChild(tdInStock);
@@ -178,6 +194,8 @@ document.addEventListener('DOMContentLoaded', function() {
       const data = await response.json();
       // متوقع: [{ id, name, quantity, oneKitQuantity, tag }]
       allStock = Array.isArray(data) ? data : [];
+      // Filter: show only items that have a positive In Stock value
+      allStock = allStock.filter(isPositiveQty);
       renderGroups(allStock);
     } catch (error) {
       console.error('Error fetching stock data:', error);
