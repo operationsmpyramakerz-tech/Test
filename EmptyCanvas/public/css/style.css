@@ -719,7 +719,17 @@ body.co-modal-open{ overflow: hidden; }
 }
 
 .co-modal-close:hover{ background: #E5E7EB; }
-.co-modal-close svg{ width: 20px; height: 20px; }
+.co-modal-close svg{ width: 20px; height: 20px; display: none; }
+.co-modal-close i{ display: none; }
+
+/* Fallback: show a visible X even if feather icons fail to render */
+.co-modal-close::before{
+  content: "×";
+  font-size: 28px;
+  line-height: 1;
+  font-weight: 800;
+  color: currentColor;
+}
 
 .co-modal-status{
   font-size: 44px;
