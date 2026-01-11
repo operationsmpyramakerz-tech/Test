@@ -4442,7 +4442,7 @@ app.get(
         doc.text("Handover confirmation", mL, startY, { width: contentW, align: "left" });
 
         drawSignatureBox("Delivered to", leftX, boxY);
-        drawSignatureBox("Operations", rightX, boxY);
+        drawSignatureBox("Received from", rightX, boxY);
 
         doc.restore();
         doc.y = prevY;
