@@ -510,7 +510,15 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   async function fetchAndDisplayOrders() {
-    ordersListDiv.innerHTML = '<p><i class="loading-icon" data-feather="loader"></i> Loading orders...</p>';
+    ordersListDiv.innerHTML = `
+      <div class="modern-loading" role="status" aria-live="polite">
+        <div class="modern-loading__spinner" aria-hidden="true"></div>
+        <div class="modern-loading__text">
+          Loading orders
+          <span class="modern-loading__dots" aria-hidden="true"><span></span><span></span><span></span></span>
+        </div>
+      </div>
+    `;
     if (window.feather) window.feather.replace();
 
     try {

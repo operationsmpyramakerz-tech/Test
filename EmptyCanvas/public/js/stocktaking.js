@@ -187,8 +187,12 @@ document.addEventListener('DOMContentLoaded', function() {
 
   const fetchStockData = async () => {
     groupsContainer.innerHTML = `
-      <div class="loading-block">
-        <i data-feather="loader" class="loading-icon"></i> Loading stock data...
+      <div class="modern-loading" role="status" aria-live="polite">
+        <div class="modern-loading__spinner" aria-hidden="true"></div>
+        <div class="modern-loading__text">
+          Loading stock data
+          <span class="modern-loading__dots" aria-hidden="true"><span></span><span></span><span></span></span>
+        </div>
       </div>
     `;
     try {
