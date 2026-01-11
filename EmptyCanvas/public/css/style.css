@@ -1707,6 +1707,7 @@ body.sidebar-collapsed .main-content { padding-left: 0 !important; }
   background: #FAFAFA;
 }
 .group-table .col-num { text-align: right; width: 120px; }
+.group-table .col-inventory { width: 160px; }
 .group-table .col-tag { width: 180px; }
 
 /* Tag badge (reuse + shadow) */
@@ -1744,6 +1745,7 @@ body.sidebar-collapsed .main-content { padding-left: 0 !important; }
   border-bottom: 1px solid var(--group-accent-border);
 }
 .group-table .col-num { text-align: right; width: 120px; }
+.group-table .col-inventory { width: 160px; }
 .group-table .col-kit { text-align: right; width: 180px; }
 
 /* Badge for "One Kit Quantity" (ملون حسب لون الجروب) */
