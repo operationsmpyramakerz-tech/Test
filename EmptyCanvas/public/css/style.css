@@ -1642,6 +1642,57 @@ body.sidebar-collapsed .main-content { padding-left: 0 !important; }
 }
 .error-block { color: #B91C1C; background: #FEE2E2; border: 1px solid #FCA5A5; border-radius: 12px; }
 
+/* ===== Modern loaders (used on data-loading screens) ===== */
+.modern-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 22px 18px;
+  border: 1px solid #E5E7EB;
+  border-radius: 16px;
+  background: rgba(255,255,255,0.82);
+  box-shadow: 0 12px 30px rgba(0,0,0,0.06);
+  color: #6B7280;
+}
+
+.modern-loading__spinner {
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  border: 3px solid rgba(234, 88, 12, 0.22);
+  border-top-color: rgba(234, 88, 12, 0.95);
+  animation: spin .9s linear infinite;
+}
+
+.modern-loading__text {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.modern-loading__dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.modern-loading__dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(107, 114, 128, 0.55);
+  animation: dotPulse 1.2s infinite ease-in-out;
+}
+.modern-loading__dots span:nth-child(2) { animation-delay: .15s; }
+.modern-loading__dots span:nth-child(3) { animation-delay: .3s; }
+
+@keyframes dotPulse {
+  0%, 80%, 100% { transform: scale(.65); opacity: .45; }
+  40% { transform: scale(1); opacity: 1; }
+}
+
 .group-card {
   --group-accent-bg: #F9FAFB;
   --group-accent-text: #111827;
@@ -1838,7 +1889,33 @@ body.sidebar-collapsed .main-content { padding-left: 0 !important; }
   transition: transform .12s ease, box-shadow .12s ease, background .12s ease;
 }
 .btn:hover { transform: translateY(-1px); box-shadow: 0 12px 26px rgba(0,0,0,.08); }
-.btn.is-busy { opacity: .7; cursor: wait; }
+.btn.is-busy,
+.btn.is-auto-busy,
+.ro-action-btn.is-busy,
+.ro-action-btn.is-auto-busy,
+button.is-busy,
+button.is-auto-busy {
+  opacity: .75;
+  cursor: wait;
+  pointer-events: none;
+}
+
+.btn.is-busy::after,
+.btn.is-auto-busy::after,
+.ro-action-btn.is-busy::after,
+.ro-action-btn.is-auto-busy::after,
+button.is-busy::after,
+button.is-auto-busy::after {
+  content: "";
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  border: 2px solid rgba(17, 24, 39, 0.25);
+  border-top-color: rgba(17, 24, 39, 0.85);
+  animation: spin .8s linear infinite;
+  margin-left: 8px;
+}
 .btn.btn--light { background: #fff; }
 .btn svg { width: 18px; height: 18px; }
 
