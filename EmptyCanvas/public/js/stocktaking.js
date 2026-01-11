@@ -1,8 +1,14 @@
 document.addEventListener('DOMContentLoaded', function() {
   const groupsContainer = document.getElementById('stock-groups');
   const searchInput     = document.getElementById('stockSearch');
+  const downloadPdfBtn  = document.getElementById('downloadPdfBtn');
+  const downloadExcelBtn = document.getElementById('downloadExcelBtn');
 
   let allStock = [];
+
+  // Keep inventory inputs persistent even when the table re-renders (search/filter)
+  // { [notionPageId]: string }
+  const inventoryValues = {};
 
   const norm = (s) => String(s || '').toLowerCase().trim();
 
@@ -142,7 +148,11 @@ document.addEventListener('DOMContentLoaded', function() {
           invInput.className = 'inventory-input';
           invInput.setAttribute('inputmode', 'numeric');
           invInput.setAttribute('aria-label', `Inventory for ${item.name || 'item'}`);
-          invInput.value = '';
+          invInput.dataset.itemId = item.id;
+          invInput.value = (inventoryValues[item.id] ?? '');
+          invInput.addEventListener('input', () => {
+            inventoryValues[item.id] = invInput.value;
+          });
           tdInventory.appendChild(invInput);
 
           tr.appendChild(tdName);
@@ -214,25 +224,78 @@ document.addEventListener('DOMContentLoaded', function() {
       }
     });
   }
-});
-// Download PDF button
-document.addEventListener('DOMContentLoaded', () => {
-  const btn = document.getElementById('downloadPdfBtn');
-  if (!btn) return;
-  btn.addEventListener('click', (e) => {
-    e.preventDefault();
+
+  // ---------- Export helpers (PDF / Excel) ----------
+  const buildInventoryPayload = () => {
+    const out = {};
+    for (const [id, raw] of Object.entries(inventoryValues)) {
+      if (raw === '' || raw === null || typeof raw === 'undefined') continue;
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n < 0) continue;
+      out[id] = n;
+    }
+    return out;
+  };
+
+  const downloadBlobResponse = async (res, fallbackName) => {
+    const blob = await res.blob();
+    const cd = res.headers.get('content-disposition') || '';
+    const m = cd.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
+    const filename = decodeURIComponent((m && (m[1] || m[2])) || fallbackName);
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const exportFile = async (btn, endpoint, fallbackName) => {
+    if (!btn) return;
     btn.disabled = true;
     btn.classList.add('is-busy');
-    // هنفتح الرابط مباشرة، الهيدر هيجبر التحميل
-    const link = document.createElement('a');
-    link.href = '/api/stock/pdf';
-    link.target = '_blank';
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    setTimeout(() => {
+
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ inventory: buildInventoryPayload() }),
+      });
+
+      if (res.status === 401) {
+        window.location.href = '/login';
+        return;
+      }
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || err.message || 'Export failed');
+      }
+
+      await downloadBlobResponse(res, fallbackName);
+    } catch (e) {
+      console.error(e);
+      alert(e.message || 'Export failed');
+    } finally {
       btn.disabled = false;
       btn.classList.remove('is-busy');
-    }, 1200);
-  });
+    }
+  };
+
+  if (downloadPdfBtn) {
+    downloadPdfBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      exportFile(downloadPdfBtn, '/api/stock/pdf', 'Stocktaking.pdf');
+    });
+  }
+
+  if (downloadExcelBtn) {
+    downloadExcelBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      exportFile(downloadExcelBtn, '/api/stock/excel', 'Stocktaking.xlsx');
+    });
+  }
 });
