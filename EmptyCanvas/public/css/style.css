@@ -1708,6 +1708,32 @@ body.sidebar-collapsed .main-content { padding-left: 0 !important; }
 }
 .group-table .col-num { text-align: right; width: 120px; }
 .group-table .col-inventory { width: 160px; }
+
+/* Inventory input (Stocktaking) */
+.inventory-input {
+  width: 100%;
+  max-width: 140px;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid #E5E7EB;
+  padding: .15rem 0;
+  text-align: right;
+  font-weight: 700;
+  color: var(--text-primary, #111827);
+  outline: none;
+}
+.inventory-input:focus {
+  border-bottom-color: var(--group-accent-border);
+}
+/* Remove number input spinners (optional) */
+.inventory-input::-webkit-outer-spin-button,
+.inventory-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.inventory-input[type=number] {
+  -moz-appearance: textfield;
+}
 .group-table .col-tag { width: 180px; }
 
 /* Tag badge (reuse + shadow) */
@@ -1746,6 +1772,32 @@ body.sidebar-collapsed .main-content { padding-left: 0 !important; }
 }
 .group-table .col-num { text-align: right; width: 120px; }
 .group-table .col-inventory { width: 160px; }
+
+/* Inventory input (Stocktaking) */
+.inventory-input {
+  width: 100%;
+  max-width: 140px;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid #E5E7EB;
+  padding: .15rem 0;
+  text-align: right;
+  font-weight: 700;
+  color: var(--text-primary, #111827);
+  outline: none;
+}
+.inventory-input:focus {
+  border-bottom-color: var(--group-accent-border);
+}
+/* Remove number input spinners (optional) */
+.inventory-input::-webkit-outer-spin-button,
+.inventory-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.inventory-input[type=number] {
+  -moz-appearance: textfield;
+}
 .group-table .col-kit { text-align: right; width: 180px; }
 
 /* Badge for "One Kit Quantity" (ملون حسب لون الجروب) */
