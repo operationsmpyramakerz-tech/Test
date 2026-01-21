@@ -323,7 +323,7 @@ body.tasks-v2 .tv2-month-btn:hover{
 
 body.tasks-v2 .tv2-month-btn.is-active{
   background: var(--tv2-orange);
-  color: #fff;
+  color: #ff7519;
 }
 
 body.tasks-v2 .tv2-month-picker__cancel{
