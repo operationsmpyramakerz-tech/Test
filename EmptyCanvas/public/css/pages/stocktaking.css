@@ -1,7 +1,2 @@
-@import url("/css/split/style.part-01.css");
-@import url("/css/split/style.part-02.css");
-@import url("/css/split/style.part-03.css");
-@import url("/css/split/style.part-04.css");
-@import url("/css/split/style.part-05.css");
-@import url("/css/split/style.part-06.css");
-@import url("/css/split/style.part-07.css");
+@import url("/css/core.css");
+@import url("/css/modules/stocktaking.css");
