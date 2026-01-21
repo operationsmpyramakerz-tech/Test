@@ -1,4 +1,5 @@
 const express = require("express");
+const fs = require("fs");
 const path = require("path");
 const { Client } = require("@notionhq/client");
 const PDFDocument = require("pdfkit"); // PDF
@@ -14,6 +15,27 @@ const stocktakingDatabaseId = process.env.School_Stocktaking_DB_ID;
 const fundsDatabaseId = process.env.Funds;
 const damagedAssetsDatabaseId = process.env.Damaged_Assets;
 const expensesDatabaseId = process.env.Expenses_Database;
+// B2B Schools DB (from ENV)
+function _extractNotionIdFromEnv(raw) {
+  if (!raw) return null;
+  const s = String(raw).trim();
+  // Accept raw 32-hex IDs, hyphenated IDs, and full Notion URLs.
+  const m = s.match(/[0-9a-f]{32}/i);
+  if (m && m[0]) return m[0];
+  // If it's already hyphenated, keep it.
+  const mh = s.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+  if (mh && mh[0]) return mh[0];
+  return s || null;
+}
+
+const b2bDatabaseId = _extractNotionIdFromEnv(
+  process.env.B2B || process.env.B2B_Database || process.env.B2B_DB_ID || null,
+);
+
+// Tasks DB (from ENV)
+const tasksDatabaseId = _extractNotionIdFromEnv(
+  process.env.TASKS || process.env.Tasks || process.env.Tasks_Database || process.env.TASKS_DB_ID || null,
+);
 const NOTION_VER = process.env.NOTION_VERSION || '2022-06-28'; // المطلوب في أمثلة Notion 
 // Team Members DB (from ENV)
 const teamMembersDatabaseId =
@@ -25,11 +47,36 @@ const teamMembersDatabaseId =
 // ----- Hardbind: Received Quantity property name (Number) -----
 const REC_PROP_HARDBIND = "Quantity received by operations";
 
+// Shared formatter (used by B2B PDF/Excel exports)
+function formatDateTime(date) {
+  try {
+    const d = date instanceof Date ? date : new Date(date);
+    if (Number.isNaN(d.getTime())) return String(date || "-");
+    return d.toLocaleString("en-GB", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return String(date || "-");
+  }
+}
+
 
 // Middleware
 app.use(express.json({ limit: '30mb' }));
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, "..", "public")));
+app.use(
+  express.static(path.join(__dirname, "..", "public"), {
+    setHeaders(res, filePath) {
+      if (filePath.endsWith("service-worker.js") || filePath.endsWith("manifest.webmanifest")) {
+        res.setHeader("Cache-Control", "no-cache");
+      }
+    },
+  })
+);
 
 
 // --- Health FIRST (before session) so it works even if env is missing ---
@@ -38,7 +85,7 @@ app.get("/health", (req, res) => {
 });
 
 // Sessions (Redis/Upstash) — added after /health
-const { sessionMiddleware } = require("./session-redis");
+const { sessionMiddleware, redisClient } = require("./session-redis");
 app.use(sessionMiddleware);
 // Small trace to debug redirect loop
 app.use((req, res, next) => {
@@ -54,6 +101,264 @@ app.use((req, res, next) => {
   next();
 });
 
+// ----------------------------------------------------------------------------
+// Performance: Shared cache (Redis + in-memory) to reduce repeated Notion calls
+// ----------------------------------------------------------------------------
+// NOTE:
+// - Memory cache helps within a warm lambda instance.
+// - Redis cache (Upstash) helps across instances / reloads.
+// - All caching is best-effort (falls back gracefully if Redis is unavailable).
+
+const _CACHE_MEM = new Map();
+const _CACHE_INFLIGHT = new Map();
+
+function _now() {
+  return Date.now();
+}
+
+function _memGet(key) {
+  const hit = _CACHE_MEM.get(key);
+  if (!hit) return null;
+  if (hit.exp && hit.exp > _now()) return hit.val;
+  _CACHE_MEM.delete(key);
+  return null;
+}
+
+function _memSet(key, val, ttlSeconds) {
+  const exp = _now() + Math.max(1, Number(ttlSeconds) || 1) * 1000;
+  _CACHE_MEM.set(key, { val, exp });
+}
+
+async function _redisGet(key) {
+  try {
+    if (!redisClient || !redisClient.isReady) return null;
+    const raw = await redisClient.get(key);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (e) {
+    // Don't break the request path on cache issues.
+    console.warn("[cache] redis get failed", key, e?.message || e);
+    return null;
+  }
+}
+
+async function _redisSet(key, val, ttlSeconds) {
+  try {
+    if (!redisClient || !redisClient.isReady) return;
+    const ttl = Math.max(1, Number(ttlSeconds) || 1);
+    await redisClient.set(key, JSON.stringify(val), { EX: ttl });
+  } catch (e) {
+    console.warn("[cache] redis set failed", key, e?.message || e);
+  }
+}
+
+async function cacheGetOrSet(key, ttlSeconds, factoryFn) {
+  const mem = _memGet(key);
+  if (mem !== null && mem !== undefined) return mem;
+
+  // De-dupe concurrent identical calls (avoid stampede)
+  if (_CACHE_INFLIGHT.has(key)) return await _CACHE_INFLIGHT.get(key);
+
+  const p = (async () => {
+    const fromRedis = await _redisGet(key);
+    if (fromRedis !== null && fromRedis !== undefined) {
+      _memSet(key, fromRedis, ttlSeconds);
+      return fromRedis;
+    }
+
+    const fresh = await factoryFn();
+    _memSet(key, fresh, ttlSeconds);
+    await _redisSet(key, fresh, ttlSeconds);
+    return fresh;
+  })();
+
+  _CACHE_INFLIGHT.set(key, p);
+  try {
+    return await p;
+  } finally {
+    _CACHE_INFLIGHT.delete(key);
+  }
+}
+
+async function cacheDel(key) {
+  if (!key) return;
+  try {
+    _CACHE_MEM.delete(key);
+    _CACHE_INFLIGHT.delete(key);
+  } catch {}
+  try {
+    if (redisClient && redisClient.isReady) {
+      await redisClient.del(key);
+    }
+  } catch (e) {
+    // don't fail the request because cache eviction failed
+    console.warn("cacheDel failed:", e?.message || e);
+  }
+}
+
+async function mapWithConcurrency(items, limit, mapper) {
+  const arr = Array.from(items || []);
+  const out = new Map();
+  if (arr.length === 0) return out;
+
+  const concurrency = Math.max(1, Number(limit) || 1);
+  let idx = 0;
+
+  const workers = new Array(Math.min(concurrency, arr.length)).fill(0).map(async () => {
+    while (idx < arr.length) {
+      const i = idx++;
+      const key = arr[i];
+      try {
+        const val = await mapper(key);
+        out.set(key, val);
+      } catch (e) {
+        out.set(key, null);
+      }
+    }
+  });
+
+  await Promise.all(workers);
+  return out;
+}
+
+async function getSessionUserNotionId(req) {
+  const cached = req.session?.userNotionId;
+  if (cached && looksLikeNotionId(cached)) return cached;
+
+  const username = req.session?.username;
+  if (!username || !teamMembersDatabaseId) return null;
+
+  try {
+    const q = await notion.databases.query({
+      database_id: teamMembersDatabaseId,
+      page_size: 1,
+      filter: { property: "Name", title: { equals: username } },
+    });
+    const id = q?.results?.[0]?.id || null;
+    if (id) req.session.userNotionId = id;
+    return id;
+  } catch (e) {
+    console.error("Error fetching user Notion ID:", e?.body || e);
+    return null;
+  }
+}
+
+const _TEAM_MEMBER_NAME_TTL_SEC = 24 * 60 * 60; // 24h
+async function getTeamMemberNameCached(pageId) {
+  if (!pageId) return "";
+  const key = `cache:notion:teamMemberName:${pageId}:v1`;
+  return await cacheGetOrSet(key, _TEAM_MEMBER_NAME_TTL_SEC, async () => {
+    try {
+      const page = await notion.pages.retrieve({ page_id: pageId });
+      return page.properties?.Name?.title?.[0]?.plain_text || "";
+    } catch {
+      return "";
+    }
+  });
+}
+
+const _PRODUCT_INFO_TTL_SEC = 6 * 60 * 60; // 6h
+async function getProductInfoCached(productPageId) {
+  if (!productPageId) {
+    return { name: "Unknown Product", idCode: null, unitPrice: null, image: null, url: null };
+  }
+
+  const key = `cache:notion:productInfo:${productPageId}:v2`;
+  return await cacheGetOrSet(key, _PRODUCT_INFO_TTL_SEC, async () => {
+    try {
+      const productPage = await notion.pages.retrieve({ page_id: productPageId });
+      const props = productPage.properties || {};
+
+      const name =
+        _extractPropText(props?.Name) ||
+        _extractPropText(_propInsensitive(props, "Name")) ||
+        "Unknown Product";
+
+      const idCode = _extractIdCodeFromProps(props) || null;
+
+      const unitPrice =
+        _extractPropNumber(_propInsensitive(props, "Unity Price")) ??
+        _extractPropNumber(_propInsensitive(props, "Unit price")) ??
+        _extractPropNumber(_propInsensitive(props, "Unit Price")) ??
+        _extractPropNumber(_propInsensitive(props, "Price")) ??
+        null;
+
+      let image = null;
+      if (productPage.cover?.type === "external") image = productPage.cover.external.url;
+      if (productPage.cover?.type === "file") image = productPage.cover.file.url;
+      if (!image && productPage.icon?.type === "external") image = productPage.icon.external.url;
+      if (!image && productPage.icon?.type === "file") image = productPage.icon.file.url;
+
+      // Prefer an explicit URL property, fall back to the Notion page URL.
+      const urlProp =
+        _propInsensitive(props, "URL") ||
+        _propInsensitive(props, "Url") ||
+        _propInsensitive(props, "Link") ||
+        _propInsensitive(props, "Website") ||
+        _propInsensitive(props, "Product URL") ||
+        _propInsensitive(props, "Product Link");
+
+      let url = null;
+      try {
+        if (urlProp?.type === "url") url = urlProp.url || null;
+        if (!url && urlProp?.type === "rich_text") {
+          const t = (urlProp.rich_text || []).map((x) => x?.plain_text || "").join("").trim();
+          url = t || null;
+        }
+        if (!url && urlProp?.type === "title") {
+          const t = (urlProp.title || []).map((x) => x?.plain_text || "").join("").trim();
+          url = t || null;
+        }
+      } catch {}
+      if (!url) url = productPage.url || null;
+
+      return { name, idCode, unitPrice, image, url };
+    } catch {
+      return { name: "Unknown Product", idCode: null, unitPrice: null, image: null, url: null };
+    }
+  });
+}
+
+// Extract an optional profile photo URL from a Notion page properties object.
+function _firstNotionFileUrl(prop) {
+  const files = prop?.files;
+  if (!Array.isArray(files) || files.length === 0) return "";
+  const f = files[0];
+  if (f?.type === "external") return f.external?.url || "";
+  if (f?.type === "file") return f.file?.url || "";
+  return "";
+}
+
+function extractProfilePhotoUrlFromProps(props) {
+  const preferred = [
+    "Photo",
+    "Personal Photo",
+    "Avatar",
+    "Profile Photo",
+    "Profile",
+    "Image",
+  ];
+  for (const key of preferred) {
+    const prop = props?.[key];
+    if (prop?.type === "files") {
+      const url = _firstNotionFileUrl(prop);
+      if (url) return url;
+    }
+  }
+
+  // Fallback: scan any files properties that look like photo/avatar
+  try {
+    for (const [key, prop] of Object.entries(props || {})) {
+      if (prop?.type !== "files") continue;
+      if (!/photo|avatar|profile|image/i.test(key)) continue;
+      const url = _firstNotionFileUrl(prop);
+      if (url) return url;
+    }
+  } catch {}
+
+  return "";
+}
+
 // Helpers: Allowed pages control
 const ALL_PAGES = [
   "Current Orders",
@@ -61,6 +366,8 @@ const ALL_PAGES = [
   "Assigned Schools Requested Orders",
   "Create New Order",
   "Stocktaking",
+  "Tasks",
+  "B2B",
   "Funds",
   "Expenses",
   "Expenses Users",
@@ -92,6 +399,8 @@ function normalizePages(names = []) {
   }
   if (set.has("create new order")) out.push("Create New Order");
   if (set.has("stocktaking")) out.push("Stocktaking");
+  if (set.has("tasks") || set.has("task")) out.push("Tasks");
+  if (set.has("b2b")) out.push("B2B");
   if (set.has("funds")) out.push("Funds");
   if (set.has("expenses")) out.push("Expenses");
   if (
@@ -131,6 +440,9 @@ function expandAllowedForUI(list = []) {
   }
   if (set.has("Logistics")) {
     set.add("Logistics");
+  }
+  if (set.has("Tasks")) {
+    set.add("Tasks");
   }
   if (set.has("Damaged Assets")) { set.add("Damaged Assets"); }
   return Array.from(set);
@@ -173,6 +485,8 @@ function firstAllowedPath(allowed = []) {
   if (list.includes("S.V schools orders")) return "/orders/sv-orders";
   if (list.includes("Create New Order")) return "/orders/new";
   if (list.includes("Stocktaking")) return "/stocktaking";
+  if (list.includes("Tasks")) return "/tasks";
+  if (list.includes("B2B")) return "/b2b";
   if (list.includes("Logistics")) return "/logistics";
   if (list.includes("Damaged Assets")) return "/damaged-assets";
   if (list.includes("S.V Schools Assets")) return "/sv-assets";
@@ -232,8 +546,24 @@ async function getCurrentUserRelationPage(req) {
   }
 }
 async function getOrdersDBProps() {
-  const db = await notion.databases.retrieve({ database_id: ordersDatabaseId });
-  return db.properties || {};
+  if (!ordersDatabaseId) return {};
+  // DB schema doesn't change often; cache it to avoid repeated Notion calls.
+  const key = `cache:notion:dbProps:${normalizeNotionId(ordersDatabaseId)}:v1`;
+  return await cacheGetOrSet(key, 10 * 60, async () => {
+    const db = await notion.databases.retrieve({ database_id: ordersDatabaseId });
+    return db.properties || {};
+  });
+}
+
+
+async function getTasksDBProps() {
+  if (!tasksDatabaseId) return {};
+  // DB schema doesn't change often; cache it to avoid repeated Notion calls.
+  const key = `cache:notion:dbProps:${normalizeNotionId(tasksDatabaseId)}:v1`;
+  return await cacheGetOrSet(key, 10 * 60, async () => {
+    const db = await notion.databases.retrieve({ database_id: tasksDatabaseId });
+    return db.properties || {};
+  });
 }
 
 // Expenses DB props helper
@@ -241,8 +571,11 @@ async function getExpensesDBProps() {
   const dbId = expensesDatabaseId || process.env.Expenses_Database;
   if (!dbId) return {};
   try {
-    const db = await notion.databases.retrieve({ database_id: dbId });
-    return db.properties || {};
+    const key = `cache:notion:dbProps:${normalizeNotionId(dbId)}:v1`;
+    return await cacheGetOrSet(key, 10 * 60, async () => {
+      const db = await notion.databases.retrieve({ database_id: dbId });
+      return db.properties || {};
+    });
   } catch (err) {
     console.error("Expenses DB props retrieve error:", err?.body || err);
     return {};
@@ -478,6 +811,20 @@ app.get("/stocktaking", requireAuth, requirePage("Stocktaking"), (req, res) => {
   res.sendFile(path.join(__dirname, "..", "public", "stocktaking.html"));
 });
 
+app.get("/tasks", requireAuth, requirePage("Tasks"), (req, res) => {
+  res.sendFile(path.join(__dirname, "..", "public", "tasks.html"));
+});
+
+// B2B page
+app.get("/b2b", requireAuth, requirePage("B2B"), (req, res) => {
+  res.sendFile(path.join(__dirname, "..", "public", "b2b.html"));
+});
+
+// B2B School detail page
+app.get("/b2b/school/:id", requireAuth, requirePage("B2B"), (req, res) => {
+  res.sendFile(path.join(__dirname, "..", "public", "b2b-school.html"));
+});
+
 // Account page
 app.get("/account", requireAuth, (req, res) => {
   res.sendFile(path.join(__dirname, "..", "public", "account.html"));
@@ -543,8 +890,29 @@ app.post("/api/login", async (req, res) => {
       req.session.authenticated = true;
       req.session.username = username;
       req.session.allowedPages = allowedNormalized;
+      // Cache user Notion page ID in session to avoid re-querying Team Members DB
+      req.session.userNotionId = user.id;
 
       const allowedUI = expandAllowedForUI(allowedNormalized);
+
+      // Cache account payload in session (used by /api/account on every page load)
+      // TTL is enforced inside /api/account.
+      try {
+        const p = user.properties || {};
+        req.session.accountCache = {
+          name: p?.Name?.title?.[0]?.plain_text || "",
+          username,
+          department: p?.Department?.select?.name || "",
+          position: p?.Position?.select?.name || "",
+          photoUrl: extractProfilePhotoUrlFromProps(p) || "",
+          phone: p?.Phone?.phone_number || "",
+          email: p?.Email?.email || "",
+          employeeCode: p?.["Employee Code"]?.number ?? null,
+          passwordSet: (p?.Password?.number ?? null) !== null,
+          allowedPages: allowedUI,
+        };
+        req.session.accountCacheTs = Date.now();
+      } catch {}
 
       req.session.save((err) => {
         if (err)
@@ -597,58 +965,25 @@ app.get("/api/account", requireAuth, async (req, res) => {
       .status(500)
       .json({ error: "Team_Members database ID is not configured." });
   }
+
+  // This endpoint is called on every page load (common-ui.js).
+  // Use a short session cache to avoid hitting Notion repeatedly.
+  res.set("Cache-Control", "no-store");
+  const ACCOUNT_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutes
   try {
-    const response = await notion.databases.query({
-      database_id: teamMembersDatabaseId,
-      filter: { property: "Name", title: { equals: req.session.username } },
-    });
-
-    if (response.results.length === 0) {
-      return res.status(404).json({ error: "User not found." });
+    const cached = req.session?.accountCache;
+    const ts = Number(req.session?.accountCacheTs || 0);
+    if (cached && ts && Date.now() - ts < ACCOUNT_CACHE_TTL_MS) {
+      return res.json(cached);
     }
+  } catch {}
 
-    const user = response.results[0];
-    const p = user.properties;
+  try {
+    const userId = await getSessionUserNotionId(req);
+    if (!userId) return res.status(404).json({ error: "User not found." });
 
-    // Try to extract an optional profile photo URL from Notion (files property).
-    // Supported property names (if they exist in your Team_Members DB):
-    // Photo / Personal Photo / Avatar / Profile Photo / Image
-    function firstFileUrl(prop){
-      const files = prop?.files;
-      if (!Array.isArray(files) || files.length === 0) return "";
-      const f = files[0];
-      if (f?.type === "external") return f.external?.url || "";
-      if (f?.type === "file") return f.file?.url || "";
-      return "";
-    }
-
-    function extractProfilePhotoUrl(props){
-      const preferred = [
-        "Photo",
-        "Personal Photo",
-        "Avatar",
-        "Profile Photo",
-        "Profile",
-        "Image",
-      ];
-      for (const key of preferred) {
-        const prop = props?.[key];
-        if (prop?.type === "files") {
-          const url = firstFileUrl(prop);
-          if (url) return url;
-        }
-      }
-      // Fallback: scan any files properties that look like photo/avatar
-      try {
-        for (const [key, prop] of Object.entries(props || {})) {
-          if (prop?.type !== "files") continue;
-          if (!/photo|avatar|profile|image/i.test(key)) continue;
-          const url = firstFileUrl(prop);
-          if (url) return url;
-        }
-      } catch {}
-      return "";
-    }
+    const userPage = await notion.pages.retrieve({ page_id: userId });
+    const p = userPage.properties || {};
 
     const freshAllowed = extractAllowedPages(p);
     req.session.allowedPages = freshAllowed;
@@ -659,7 +994,7 @@ app.get("/api/account", requireAuth, async (req, res) => {
       username: req.session.username || "",
       department: p?.Department?.select?.name || "",
       position: p?.Position?.select?.name || "",
-      photoUrl: extractProfilePhotoUrl(p) || "",
+      photoUrl: extractProfilePhotoUrlFromProps(p) || "",
       phone: p?.Phone?.phone_number || "",
       email: p?.Email?.email || "",
       employeeCode: p?.["Employee Code"]?.number ?? null,
@@ -667,7 +1002,12 @@ app.get("/api/account", requireAuth, async (req, res) => {
       allowedPages: allowedUI,
     };
 
-    res.set("Cache-Control", "no-store");
+    // Update session cache
+    try {
+      req.session.accountCache = data;
+      req.session.accountCacheTs = Date.now();
+    } catch {}
+
     res.json(data);
   } catch (error) {
     console.error("Error fetching account from Notion:", error.body || error);
@@ -675,6 +1015,2230 @@ app.get("/api/account", requireAuth, async (req, res) => {
   }
 });
 
+
+
+
+
+// ===== Tasks APIs =====
+// Uses Notion database ID from process.env.TASKS
+
+// ---- Tasks helpers: department scoping (Team Members DB) ----
+// We scope "All Tasks" to the current user's Department and we also
+// expose the list of users in the same Department for the Tasks UI.
+const _TEAM_MEMBERS_BY_DEPT_TTL_SEC = 5 * 60; // 5 minutes
+
+async function getSessionUserDepartment(req) {
+  try {
+    const cached = req.session?.accountCache?.department;
+    if (cached !== undefined && cached !== null) return String(cached || "");
+  } catch {}
+
+  try {
+    const userId = await getSessionUserNotionId(req);
+    if (!userId || !teamMembersDatabaseId) return "";
+
+    const userPage = await notion.pages.retrieve({ page_id: userId });
+    const dept = userPage?.properties?.Department?.select?.name || "";
+
+    // Best-effort: update session cache so subsequent calls are fast.
+    try {
+      req.session.accountCache = req.session.accountCache || {};
+      req.session.accountCache.department = dept;
+      req.session.accountCacheTs = Date.now();
+    } catch {}
+
+    return String(dept || "");
+  } catch (e) {
+    console.error("getSessionUserDepartment error:", e?.body || e);
+    return "";
+  }
+}
+
+async function getTeamMembersByDepartmentCached(deptName) {
+  const dept = String(deptName || "").trim();
+  if (!dept || !teamMembersDatabaseId) return [];
+
+  const key = `cache:notion:teamMembersByDept:${dept}:v1`;
+  return await cacheGetOrSet(key, _TEAM_MEMBERS_BY_DEPT_TTL_SEC, async () => {
+    // Try native Notion filter (fast). If schema differs, fall back to filtering in code.
+    const out = [];
+    try {
+      let cursor = undefined;
+      let hasMore = true;
+
+      while (hasMore) {
+        const r = await notion.databases.query({
+          database_id: teamMembersDatabaseId,
+          page_size: 100,
+          start_cursor: cursor,
+          filter: { property: "Department", select: { equals: dept } },
+          sorts: [{ property: "Name", direction: "ascending" }],
+        });
+
+        for (const p of r.results || []) {
+          out.push({
+            id: p.id,
+            name: p.properties?.Name?.title?.[0]?.plain_text || "Unnamed",
+            department: p.properties?.Department?.select?.name || "",
+          });
+        }
+
+        hasMore = !!r.has_more;
+        cursor = r.next_cursor || undefined;
+        if (!hasMore) break;
+      }
+
+      return out;
+    } catch (e) {
+      // Fallback: fetch all and filter locally
+      console.warn("[tasks] Team members dept filter fallback:", e?.body || e);
+      try {
+        out.length = 0;
+        let cursor2 = undefined;
+        let hasMore2 = true;
+        while (hasMore2) {
+          const r2 = await notion.databases.query({
+            database_id: teamMembersDatabaseId,
+            page_size: 100,
+            start_cursor: cursor2,
+            sorts: [{ property: "Name", direction: "ascending" }],
+          });
+          for (const p of r2.results || []) {
+            const d = p.properties?.Department?.select?.name || "";
+            if (String(d).trim() !== dept) continue;
+            out.push({
+              id: p.id,
+              name: p.properties?.Name?.title?.[0]?.plain_text || "Unnamed",
+              department: d,
+            });
+          }
+          hasMore2 = !!r2.has_more;
+          cursor2 = r2.next_cursor || undefined;
+          if (!hasMore2) break;
+        }
+        return out;
+      } catch (e2) {
+        console.error("[tasks] Team members fallback failed:", e2?.body || e2);
+        return [];
+      }
+    }
+  });
+}
+
+function _titleTextFromProp(prop) {
+  if (!prop) return "";
+  const arr = prop.title || prop.rich_text || [];
+  if (Array.isArray(arr) && arr.length) return arr.map((t) => t.plain_text).join("");
+  return "";
+}
+
+function _dateStartFromProp(prop) {
+  if (!prop) return null;
+  if (prop.type === "date" && prop.date) return prop.date.start || null;
+  return null;
+}
+
+function _selectFromProp(prop) {
+  if (!prop) return null;
+  if (prop.type === "select" && prop.select) {
+    return { name: prop.select.name || "", color: prop.select.color || "default" };
+  }
+  if (prop.type === "status" && prop.status) {
+    return { name: prop.status.name || "", color: prop.status.color || "default" };
+  }
+  if (prop.type === "multi_select" && Array.isArray(prop.multi_select) && prop.multi_select[0]) {
+    const s = prop.multi_select[0];
+    return { name: s.name || "", color: s.color || "default" };
+  }
+  return null;
+}
+
+function _formatUniqueId(prop) {
+  if (!prop || prop.type !== "unique_id" || !prop.unique_id) return "";
+  const prefix = prop.unique_id.prefix || "";
+  const num = prop.unique_id.number;
+  if (num === null || num === undefined) return "";
+  return prefix ? `${prefix}-${num}` : String(num);
+}
+
+function _findFirstUniqueIdPropName(propsObj = {}) {
+  for (const [k, v] of Object.entries(propsObj || {})) {
+    if (v && v.type === "unique_id") return k;
+  }
+  return null;
+}
+
+async function getTasksSchemaCached() {
+  const props = await getTasksDBProps();
+  const titleProp = firstTitlePropName(props) || "Name";
+  const priorityProp = pickPropName(props, ["Priority Level", "Priority", "Priority level", "PriorityLevel"]);
+  const statusProp = pickPropName(props, ["Status", "Task Status", "State"]);
+  const deliveryDateProp = pickPropName(props, ["Delivery Date", "Due Date", "Due date", "Deadline"]);
+  const completionProp = pickPropName(props, ["Completion Rate", "Completion", "Progress", "Completion rate"]);
+  const createdByProp = pickPropName(props, ["Created By", "Creator", "Created by"]);
+  const assigneeProp = pickPropName(props, ["Assignee To", "Assignee", "Assigned To", "Assignee to"]);
+  const idProp = pickPropName(props, ["ID", "Id"]) || _findFirstUniqueIdPropName(props);
+
+  return {
+    props,
+    titleProp,
+    priorityProp,
+    statusProp,
+    deliveryDateProp,
+    completionProp,
+    createdByProp,
+    assigneeProp,
+    idProp,
+  };
+}
+
+function _parseNumberProp(prop) {
+  if (!prop) return null;
+  try {
+    if (prop.type === "number") return prop.number ?? null;
+
+    if (prop.type === "formula") {
+      if (prop.formula?.type === "number") return prop.formula.number ?? null;
+      if (prop.formula?.type === "string") {
+        const n = parseFloat(prop.formula.string);
+        return Number.isFinite(n) ? n : null;
+      }
+    }
+
+    if (prop.type === "rollup") {
+      const r = prop.rollup;
+      if (!r) return null;
+      if (r.type === "number") return r.number ?? null;
+      if (r.type === "array" && Array.isArray(r.array)) {
+        const nums = r.array
+          .map((x) => (x?.type === "number" ? x.number : null))
+          .filter((n) => typeof n === "number");
+        if (!nums.length) return null;
+        return nums.reduce((a, b) => a + b, 0);
+      }
+    }
+  } catch {}
+  return null;
+}
+
+// Meta for building UI (priority options etc.)
+app.get("/api/tasks/meta", requireAuth, requirePage("Tasks"), async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  if (!tasksDatabaseId) return res.status(500).json({ error: "TASKS database ID is not configured." });
+
+  try {
+    const schema = await getTasksSchemaCached();
+    const props = schema.props || {};
+    const meta = {
+      titleProp: schema.titleProp,
+      priorityProp: schema.priorityProp,
+      statusProp: schema.statusProp,
+      deliveryDateProp: schema.deliveryDateProp,
+      completionProp: schema.completionProp,
+      idProp: schema.idProp,
+      options: {
+        priority: [],
+        status: [],
+      },
+    };
+
+    if (schema.priorityProp && props[schema.priorityProp]) {
+      const def = props[schema.priorityProp];
+      if (def.type === "select") meta.options.priority = (def.select?.options || []).map((o) => ({ name: o.name, color: o.color || "default" }));
+      if (def.type === "status") meta.options.priority = (def.status?.options || []).map((o) => ({ name: o.name, color: o.color || "default" }));
+      if (def.type === "multi_select") meta.options.priority = (def.multi_select?.options || []).map((o) => ({ name: o.name, color: o.color || "default" }));
+    }
+    if (schema.statusProp && props[schema.statusProp]) {
+      const def = props[schema.statusProp];
+      if (def.type === "select") meta.options.status = (def.select?.options || []).map((o) => ({ name: o.name, color: o.color || "default" }));
+      if (def.type === "status") meta.options.status = (def.status?.options || []).map((o) => ({ name: o.name, color: o.color || "default" }));
+    }
+
+    return res.json(meta);
+  } catch (e) {
+    console.error("Tasks meta error:", e?.body || e);
+    return res.status(500).json({ error: "Failed to load tasks metadata." });
+  }
+});
+
+// Users list for Tasks filters (same Department as current user)
+app.get("/api/tasks/users", requireAuth, requirePage("Tasks"), async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  if (!teamMembersDatabaseId) {
+    return res.status(500).json({ error: "Team_Members database ID is not configured." });
+  }
+
+  try {
+    const meId = await getSessionUserNotionId(req);
+    if (!meId) return res.status(404).json({ error: "User not found." });
+
+    const department = await getSessionUserDepartment(req);
+    if (!department) {
+      return res.json({ department: "", meId, users: [] });
+    }
+
+    const users = await getTeamMembersByDepartmentCached(department);
+    return res.json({
+      department,
+      meId,
+      users: (users || []).map((u) => ({ id: u.id, name: u.name || "Unnamed" })),
+    });
+  } catch (e) {
+    console.error("Tasks users error:", e?.body || e);
+    return res.status(500).json({ error: "Failed to load tasks users." });
+  }
+});
+
+app.get("/api/tasks", requireAuth, requirePage("Tasks"), async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  if (!tasksDatabaseId) return res.status(500).json({ error: "TASKS database ID is not configured." });
+
+  try {
+    const schema = await getTasksSchemaCached();
+    const userId = await getSessionUserNotionId(req);
+    const scope = String(req.query.scope || "mine").trim().toLowerCase();
+    const rawAssignee = String(req.query.assignee || req.query.assigneeId || req.query.userId || "").trim();
+    const assigneeId = looksLikeNotionId(rawAssignee) ? toHyphenatedUUID(rawAssignee) : null;
+
+    // Filter rules:
+    // - scope=mine  => tasks where Assignee To contains current user
+    // - scope=all   => tasks where Assignee To contains any user in SAME Department as current user
+    // - assignee=ID => tasks where Assignee To contains that user (must be in same Department)
+    let filter = undefined;
+
+    const def = schema.assigneeProp ? schema.props?.[schema.assigneeProp] : null;
+    const canFilterByAssignee = !!(schema.assigneeProp && def && def.type === "relation");
+
+    // Build same-department member IDs (only if we need them)
+    let deptMemberIds = [];
+    if (canFilterByAssignee && (scope === "all" || !!assigneeId)) {
+      const dept = await getSessionUserDepartment(req);
+      if (dept) {
+        const members = await getTeamMembersByDepartmentCached(dept);
+        deptMemberIds = (members || []).map((m) => m?.id).filter(Boolean);
+      }
+    }
+
+    if (canFilterByAssignee && assigneeId) {
+      // Security: only allow selecting users from the same department
+      if (deptMemberIds.length) {
+        const allowed = new Set(deptMemberIds.map((x) => normalizeNotionId(x)));
+        if (!allowed.has(normalizeNotionId(assigneeId))) {
+          return res.status(403).json({ error: "Assignee is not in the same department." });
+        }
+      }
+      filter = { property: schema.assigneeProp, relation: { contains: assigneeId } };
+    } else if (canFilterByAssignee && scope === "all") {
+      // All Tasks = same department
+      if (deptMemberIds.length) {
+        // Notion filter: OR across department members
+        filter = {
+          or: deptMemberIds.map((id) => ({ property: schema.assigneeProp, relation: { contains: id } })),
+        };
+      } else if (userId) {
+        // Fallback: if dept is unknown, at least show mine
+        filter = { property: schema.assigneeProp, relation: { contains: userId } };
+      }
+    } else if (canFilterByAssignee && userId) {
+      // Default = mine
+      filter = { property: schema.assigneeProp, relation: { contains: userId } };
+    }
+
+    const sorts = [];
+    if (schema.deliveryDateProp) sorts.push({ property: schema.deliveryDateProp, direction: "ascending" });
+    sorts.push({ timestamp: "created_time", direction: "descending" });
+
+    const all = [];
+    let hasMore = true;
+    let cursor = undefined;
+
+    while (hasMore) {
+      const r = await notion.databases.query({
+        database_id: tasksDatabaseId,
+        page_size: 100,
+        start_cursor: cursor,
+        filter,
+        sorts,
+      });
+
+      for (const p of r.results || []) {
+        const props = p.properties || {};
+        const title = _titleTextFromProp(props?.[schema.titleProp]) || "Untitled";
+
+        const priority = schema.priorityProp ? _selectFromProp(props?.[schema.priorityProp]) : null;
+        const status = schema.statusProp ? _selectFromProp(props?.[schema.statusProp]) : null;
+
+        const dueDate = schema.deliveryDateProp ? _dateStartFromProp(props?.[schema.deliveryDateProp]) : null;
+        const completion = schema.completionProp ? _parseNumberProp(props?.[schema.completionProp]) : null;
+
+        const idText = schema.idProp ? _formatUniqueId(props?.[schema.idProp]) : "";
+
+        // Relations → names (best-effort)
+        let createdBy = "";
+        if (schema.createdByProp && props?.[schema.createdByProp]?.type === "relation") {
+          const rid = props[schema.createdByProp].relation?.[0]?.id;
+          if (rid) createdBy = await getTeamMemberNameCached(rid);
+        }
+
+        let assignees = [];
+        if (schema.assigneeProp && props?.[schema.assigneeProp]?.type === "relation") {
+          const ids = (props[schema.assigneeProp].relation || []).map((x) => x?.id).filter(Boolean);
+          if (ids.length) {
+            const map = await mapWithConcurrency(ids, 4, getTeamMemberNameCached);
+            assignees = ids.map((id) => map.get(id) || "").filter(Boolean);
+          }
+        }
+
+        all.push({
+          id: p.id,
+          url: p.url,
+          title,
+          idText,
+          priority,
+          status,
+          dueDate,
+          completion,
+          createdTime: p.created_time,
+          lastEditedTime: p.last_edited_time,
+          createdBy,
+          assignees,
+        });
+      }
+
+      hasMore = !!r.has_more;
+      cursor = r.next_cursor || undefined;
+      if (!hasMore) break;
+    }
+
+    return res.json({ tasks: all });
+  } catch (e) {
+    console.error("Tasks list error:", e?.body || e);
+    return res.status(500).json({ error: "Failed to load tasks." });
+  }
+});
+
+app.get("/api/tasks/:id", requireAuth, requirePage("Tasks"), async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  const id = req.params.id;
+  if (!id) return res.status(400).json({ error: "Missing task id" });
+
+  try {
+    const schema = await getTasksSchemaCached();
+    const page = await notion.pages.retrieve({ page_id: id });
+    const props = page.properties || {};
+
+    const title = _titleTextFromProp(props?.[schema.titleProp]) || "Untitled";
+    const priority = schema.priorityProp ? _selectFromProp(props?.[schema.priorityProp]) : null;
+    const status = schema.statusProp ? _selectFromProp(props?.[schema.statusProp]) : null;
+    const dueDate = schema.deliveryDateProp ? _dateStartFromProp(props?.[schema.deliveryDateProp]) : null;
+    const completion = schema.completionProp ? _parseNumberProp(props?.[schema.completionProp]) : null;
+    const idText = schema.idProp ? _formatUniqueId(props?.[schema.idProp]) : "";
+
+    let createdBy = "";
+    if (schema.createdByProp && props?.[schema.createdByProp]?.type === "relation") {
+      const rid = props[schema.createdByProp].relation?.[0]?.id;
+      if (rid) createdBy = await getTeamMemberNameCached(rid);
+    }
+
+    let assignees = [];
+    if (schema.assigneeProp && props?.[schema.assigneeProp]?.type === "relation") {
+      const ids = (props[schema.assigneeProp].relation || []).map((x) => x?.id).filter(Boolean);
+      if (ids.length) {
+        const map = await mapWithConcurrency(ids, 4, getTeamMemberNameCached);
+        assignees = ids.map((id) => map.get(id) || "").filter(Boolean);
+      }
+    }
+
+    // Pull to-do blocks (checklist) from page content (best-effort)
+    const todos = [];
+    let cursor = undefined;
+    let hasMore = true;
+
+    while (hasMore) {
+      const resp = await notion.blocks.children.list({
+        block_id: id,
+        page_size: 100,
+        start_cursor: cursor,
+      });
+
+      for (const b of resp.results || []) {
+        if (b.type === "to_do") {
+          const rt = b.to_do?.rich_text || [];
+          const txt = Array.isArray(rt) ? rt.map((t) => t.plain_text).join("") : "";
+          todos.push({ text: txt, checked: !!b.to_do?.checked });
+        }
+      }
+
+      hasMore = !!resp.has_more;
+      cursor = resp.next_cursor || undefined;
+      if (!hasMore) break;
+    }
+
+    return res.json({
+      id: page.id,
+      url: page.url,
+      title,
+      idText,
+      priority,
+      status,
+      dueDate,
+      completion,
+      createdTime: page.created_time,
+      lastEditedTime: page.last_edited_time,
+      createdBy,
+      assignees,
+      todos,
+    });
+  } catch (e) {
+    console.error("Task details error:", e?.body || e);
+    return res.status(500).json({ error: "Failed to load task details." });
+  }
+});
+
+app.post("/api/tasks", requireAuth, requirePage("Tasks"), async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  if (!tasksDatabaseId) return res.status(500).json({ error: "TASKS database ID is not configured." });
+
+  try {
+    const schema = await getTasksSchemaCached();
+    const title = String(req.body?.title || req.body?.subject || "").trim();
+    const priorityName = String(req.body?.priority || "").trim();
+    const statusName = String(req.body?.status || "").trim();
+    const dueDate = String(req.body?.dueDate || req.body?.deliveryDate || "").trim();
+
+    if (!title) return res.status(400).json({ error: "Title is required" });
+
+    const properties = {};
+    properties[schema.titleProp] = { title: [{ text: { content: title } }] };
+
+    if (schema.priorityProp && priorityName) {
+      const def = schema.props?.[schema.priorityProp];
+      if (def?.type === "select") properties[schema.priorityProp] = { select: { name: priorityName } };
+      if (def?.type === "status") properties[schema.priorityProp] = { status: { name: priorityName } };
+      if (def?.type === "multi_select") properties[schema.priorityProp] = { multi_select: [{ name: priorityName }] };
+    }
+
+    if (schema.statusProp && statusName) {
+      const def = schema.props?.[schema.statusProp];
+      if (def?.type === "select") properties[schema.statusProp] = { select: { name: statusName } };
+      if (def?.type === "status") properties[schema.statusProp] = { status: { name: statusName } };
+    }
+
+    if (schema.deliveryDateProp && dueDate) {
+      properties[schema.deliveryDateProp] = { date: { start: dueDate } };
+    }
+
+    // Default: set Created By & Assignee To to current user (if relation props exist)
+    const me = await getSessionUserNotionId(req);
+    if (me) {
+      if (schema.createdByProp && schema.props?.[schema.createdByProp]?.type === "relation") {
+        properties[schema.createdByProp] = { relation: [{ id: me }] };
+      }
+      if (schema.assigneeProp && schema.props?.[schema.assigneeProp]?.type === "relation") {
+        properties[schema.assigneeProp] = { relation: [{ id: me }] };
+      }
+    }
+
+    const created = await notion.pages.create({
+      parent: { database_id: tasksDatabaseId },
+      properties,
+    });
+
+    return res.json({ ok: true, id: created.id, url: created.url });
+  } catch (e) {
+    console.error("Task create error:", e?.body || e);
+    return res.status(500).json({ error: "Failed to create task." });
+  }
+});
+
+// ===== End Tasks APIs =====
+
+// ===== B2B Schools APIs =====
+// Uses Notion database ID from process.env.B2B
+
+function _firstTitleFromProps(props, preferredNames = []) {
+  const p = props || {};
+  for (const name of preferredNames) {
+    const v = p[name];
+    if (v && v.type === "title" && Array.isArray(v.title) && v.title[0]?.plain_text) {
+      return v.title.map((t) => t.plain_text).join("");
+    }
+  }
+  for (const v of Object.values(p)) {
+    if (v && v.type === "title" && Array.isArray(v.title) && v.title[0]?.plain_text) {
+      return v.title.map((t) => t.plain_text).join("");
+    }
+  }
+  return "";
+}
+
+function _firstTextFromProp(prop) {
+  if (!prop) return "";
+  if (Array.isArray(prop.rich_text) && prop.rich_text[0]?.plain_text) {
+    return prop.rich_text.map((t) => t.plain_text).join("");
+  }
+  if (Array.isArray(prop.title) && prop.title[0]?.plain_text) {
+    return prop.title.map((t) => t.plain_text).join("");
+  }
+  if (typeof prop.url === "string") return prop.url;
+  if (prop.type === "select" && prop.select?.name) return prop.select.name;
+  return "";
+}
+
+function _selectNameColor(prop) {
+  if (!prop) return null;
+  if (prop.type === "select" && prop.select) {
+    return {
+      name: prop.select.name || "",
+      color: prop.select.color || "default",
+    };
+  }
+  if (prop.type === "multi_select" && Array.isArray(prop.multi_select) && prop.multi_select[0]) {
+    const s = prop.multi_select[0];
+    return { name: s.name || "", color: s.color || "default" };
+  }
+  return null;
+}
+
+function _multiSelectNames(prop) {
+  if (!prop) return [];
+  if (prop.type === "multi_select" && Array.isArray(prop.multi_select)) {
+    return prop.multi_select.map((x) => x?.name).filter(Boolean);
+  }
+  if (prop.type === "select" && prop.select?.name) return [prop.select.name];
+  return [];
+}
+
+async function _queryAllPages(database_id, { filter, sorts } = {}) {
+  const all = [];
+  let hasMore = true;
+  let startCursor = undefined;
+
+  while (hasMore) {
+    const resp = await notion.databases.query({
+      database_id,
+      page_size: 100,
+      start_cursor: startCursor,
+      filter,
+      sorts,
+    });
+    all.push(...(resp.results || []));
+    hasMore = !!resp.has_more;
+    startCursor = resp.next_cursor || undefined;
+  }
+
+  return all;
+}
+
+async function _getB2BSchoolsList() {
+  if (!b2bDatabaseId) return [];
+  const cacheKey = `cache:api:b2b:schools:list:${b2bDatabaseId}:v1`;
+  return await cacheGetOrSet(cacheKey, 60, async () => {
+    const pages = await _queryAllPages(b2bDatabaseId, {});
+
+    return (pages || []).map((page) => {
+      const props = page.properties || {};
+      const name = _firstTitleFromProps(props, ["School name", "Name", "School"]);
+      const governorate =
+        _selectNameColor(props.Governorate) ||
+        _selectNameColor(props.Governorates) ||
+        _selectNameColor(props.GovernorateName) ||
+        null;
+
+      return {
+        id: page.id,
+        name: name || "Untitled",
+        governorate,
+        educationSystem: _multiSelectNames(props["Education System"] || props["Education system"] || props.Education),
+        programType: (props["Program type"] && props["Program type"].select?.name) || (props["Program Type"] && props["Program Type"].select?.name) || (props.Program && props.Program.select?.name) || "",
+      };
+    });
+  });
+}
+
+async function _getB2BSchoolById(schoolId) {
+  if (!schoolId) return null;
+
+  // Try from cached list first
+  try {
+    const list = await _getB2BSchoolsList();
+    const hit = Array.isArray(list) ? list.find((x) => x && x.id === schoolId) : null;
+    if (hit) return hit;
+  } catch {}
+
+  // Fallback: retrieve the Notion page directly
+  try {
+    const page = await notion.pages.retrieve({ page_id: schoolId });
+    const props = page.properties || {};
+
+    const name = _firstTitleFromProps(props, ["School name", "Name", "School"]);
+    const governorate =
+      _selectNameColor(props.Governorate) ||
+      _selectNameColor(props.Governorates) ||
+      _selectNameColor(props.GovernorateName) ||
+      null;
+
+    return { id: page.id, name: name || "Untitled", governorate };
+  } catch (e) {
+    return null;
+  }
+}
+
+async function _getStocktakingDBProps() {
+  if (!stocktakingDatabaseId) return {};
+  const cacheKey = `cache:notion:dbprops:stocktaking:${stocktakingDatabaseId}:v1`;
+  return await cacheGetOrSet(cacheKey, 10 * 60, async () => {
+    const db = await notion.databases.retrieve({ database_id: stocktakingDatabaseId });
+    return db.properties || {};
+  });
+}
+
+function _findPropNameByNorm(schemaProps, desired) {
+  if (!desired) return null;
+  const want = normKey(desired);
+  for (const key of Object.keys(schemaProps || {})) {
+    if (normKey(key) === want) return key;
+  }
+  return null;
+}
+
+function _escapeRegExp(s) {
+  return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function _cairoDateISO(date = new Date()) {
+  // YYYY-MM-DD in Africa/Cairo (stable for Notion property names)
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Africa/Cairo',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(date);
+    const get = (t) => parts.find((p) => p.type === t)?.value;
+    const y = get('year');
+    const m = get('month');
+    const d = get('day');
+    if (y && m && d) return `${y}-${m}-${d}`;
+  } catch {}
+  return new Date(date).toISOString().slice(0, 10);
+}
+
+function _makeInventoryPropName(schoolName, dateISO) {
+  const base = String(schoolName || '').trim();
+  const d = String(dateISO || '').trim();
+  return `${base} Inventory ${d}`.trim();
+}
+
+function _findLatestInventoryProp(schemaProps, schoolName) {
+  const name = String(schoolName || '').trim();
+  if (!name) return null;
+
+  // Match: "<School> Inventory YYYY-MM-DD" (case-insensitive)
+  const re = new RegExp(`^\\s*${_escapeRegExp(name)}\\s+inventory\\s+(\\d{4}-\\d{2}-\\d{2})\\s*$`, 'i');
+
+  let best = null;
+  for (const key of Object.keys(schemaProps || {})) {
+    const m = String(key || '').match(re);
+    if (!m) continue;
+    const dateStr = m[1];
+    if (!best || String(dateStr) > String(best.date)) {
+      best = { name: key, date: dateStr };
+    }
+  }
+  return best;
+}
+
+
+
+function _makeDefectedPropName(schoolName, dateISO) {
+  const base = String(schoolName || '').trim();
+  const d = String(dateISO || '').trim();
+  return `${base} Defected ${d}`.trim();
+}
+
+function _findLatestDefectedProp(schemaProps, schoolName) {
+  const name = String(schoolName || '').trim();
+  if (!name) return null;
+
+  // Match: "<School> Defected YYYY-MM-DD" (case-insensitive)
+  const re = new RegExp(`^\\s*${_escapeRegExp(name)}\\s+defected\\s+(\\d{4}-\\d{2}-\\d{2})\\s*$`, 'i');
+
+  let best = null;
+  for (const key of Object.keys(schemaProps || {})) {
+    const m = String(key || '').match(re);
+    if (!m) continue;
+    const dateStr = m[1];
+    if (!best || String(dateStr) > String(best.date)) {
+      best = { name: key, date: dateStr };
+    }
+  }
+  return best;
+}
+
+async function _ensureInventoryPropExists({ schoolName, dateISO }) {
+  if (!stocktakingDatabaseId) return null;
+  const name = String(schoolName || '').trim();
+  const d = String(dateISO || '').trim();
+  if (!name || !d) return null;
+
+  const desired = _makeInventoryPropName(name, d);
+
+  const schemaPropsBefore = await _getStocktakingDBProps();
+  const existing = _findPropNameByNorm(schemaPropsBefore, desired);
+  if (existing) return existing;
+
+  // Create a new Number property in the School Stocktaking DB
+  await notion.databases.update({
+    database_id: stocktakingDatabaseId,
+    properties: {
+      [desired]: { number: { format: 'number' } },
+    },
+  });
+
+  // Invalidate schema cache so subsequent requests see the new property.
+  try {
+    const cacheKey = `cache:notion:dbprops:stocktaking:${stocktakingDatabaseId}:v1`;
+    await cacheDel(cacheKey);
+  } catch {}
+
+  // Return canonical name (as stored by Notion)
+  const schemaPropsAfter = await _getStocktakingDBProps();
+  return _findPropNameByNorm(schemaPropsAfter, desired) || desired;
+}
+
+
+async function _ensureDefectedPropExists({ schoolName, dateISO }) {
+  if (!stocktakingDatabaseId) return null;
+  const name = String(schoolName || '').trim();
+  const d = String(dateISO || '').trim();
+  if (!name || !d) return null;
+
+  const desired = _makeDefectedPropName(name, d);
+
+  const schemaPropsBefore = await _getStocktakingDBProps();
+  const existing = _findPropNameByNorm(schemaPropsBefore, desired);
+  if (existing) return existing;
+
+  // Create a new Number property in the School Stocktaking DB
+  await notion.databases.update({
+    database_id: stocktakingDatabaseId,
+    properties: {
+      [desired]: { number: { format: 'number' } },
+    },
+  });
+
+  // Invalidate schema cache so subsequent requests see the new property.
+  try {
+    const cacheKey = `cache:notion:dbprops:stocktaking:${stocktakingDatabaseId}:v1`;
+    await cacheDel(cacheKey);
+  } catch {}
+
+  // Return canonical name (as stored by Notion)
+  const schemaPropsAfter = await _getStocktakingDBProps();
+  return _findPropNameByNorm(schemaPropsAfter, desired) || desired;
+}
+
+function _boolFrom(prop) {
+  if (!prop) return false;
+  if (typeof prop.checkbox === "boolean") return prop.checkbox;
+  if (prop.formula && typeof prop.formula.boolean === "boolean") return prop.formula.boolean;
+  if (prop.rollup && typeof prop.rollup.boolean === "boolean") return prop.rollup.boolean;
+  return false;
+}
+
+async function _getB2BSchoolStocktakingPayload(schoolId) {
+  const id = String(schoolId || "").trim();
+  if (!id) return { meta: {}, items: [] };
+
+  const cacheKey = `cache:api:b2b:school-stock:${id}:v5`;
+  return await cacheGetOrSet(cacheKey, 60, async () => {
+    const school = await _getB2BSchoolById(id);
+    if (!school) return { meta: {}, items: [] };
+    const schoolName = String(school.name || "").trim();
+    if (!schoolName) return { meta: {}, items: [] };
+
+    const schemaProps = await _getStocktakingDBProps();
+
+    // Done column is the expected quantity for the school (as in Notion: "<School> Done")
+    const donePropName =
+      _findPropNameByNorm(schemaProps, `${schoolName} Done`) || `${schoolName} Done`;
+
+    // Inventory column is created per school + date:
+    // "<School> Inventory YYYY-MM-DD" (latest one wins)
+    const latestInv = _findLatestInventoryProp(schemaProps, schoolName);
+    const inventoryPropName = latestInv?.name || null;
+    const inventoryDate = latestInv?.date || null;
+
+    const latestDef = _findLatestDefectedProp(schemaProps, schoolName);
+    const defectedPropName = latestDef?.name || null;
+    const defectedDate = latestDef?.date || null;
+
+    const productsNameToIdCode = await _getProductsNameToIdCodeMap();
+    const lookupIdCode = (componentName, fallbackProps) => {
+      const fromProducts = productsNameToIdCode.get(_normNameKey(componentName));
+      return fromProducts || _extractIdCodeFromProps(fallbackProps || {}) || "";
+    };
+
+    const allStock = [];
+    let hasMore = true;
+    let startCursor = undefined;
+
+    const numberFrom = (prop) => {
+      if (!prop) return undefined;
+      if (typeof prop.number === "number") return prop.number;
+      if (prop.formula && typeof prop.formula.number === "number") return prop.formula.number;
+      if (prop.rollup && typeof prop.rollup.number === "number") return prop.rollup.number;
+      return undefined;
+    };
+
+    const numberOrNull = (prop) => {
+      const n = numberFrom(prop);
+      return typeof n === "number" ? n : null;
+    };
+
+    while (hasMore) {
+      const resp = await notion.databases.query({
+        database_id: stocktakingDatabaseId,
+        start_cursor: startCursor,
+        sorts: [{ property: "Name", direction: "ascending" }],
+      });
+
+      const batch = (resp.results || [])
+        .map((page) => {
+          const props = page.properties || {};
+          const componentName =
+            props.Name?.title?.[0]?.plain_text ||
+            props.Component?.title?.[0]?.plain_text ||
+            "Untitled";
+
+          const doneKey =
+            (donePropName in props && donePropName) ||
+            _findPropNameByNorm(props, `${schoolName} Done`) ||
+            `${schoolName} Done`;
+
+          const doneQuantity = numberOrNull(props[doneKey]);
+          const doneBool = _boolFrom(props[doneKey]) || Number(doneQuantity || 0) > 0;
+
+          let inventory = null;
+          if (inventoryPropName) {
+            const invKey =
+              (inventoryPropName in props && inventoryPropName) ||
+              _findPropNameByNorm(props, inventoryPropName) ||
+              inventoryPropName;
+            inventory = numberOrNull(props[invKey]);
+          }
+
+          let defected = null;
+          if (defectedPropName) {
+            const defKey =
+              (defectedPropName in props && defectedPropName) ||
+              _findPropNameByNorm(props, defectedPropName) ||
+              defectedPropName;
+            defected = numberOrNull(props[defKey]);
+          }
+
+          const idCode = lookupIdCode(componentName, props);
+
+          let tag = null;
+          if (props.Tag?.select) {
+            tag = {
+              name: props.Tag.select.name,
+              color: props.Tag.select.color || "default",
+            };
+          } else if (Array.isArray(props.Tag?.multi_select) && props.Tag.multi_select.length > 0) {
+            const t = props.Tag.multi_select[0];
+            tag = { name: t.name, color: t.color || "default" };
+          } else if (Array.isArray(props.Tags?.multi_select) && props.Tags.multi_select.length > 0) {
+            const t = props.Tags.multi_select[0];
+            tag = { name: t.name, color: t.color || "default" };
+          }
+
+          return {
+            id: page.id,
+            name: componentName,
+            idCode: idCode || "",
+            doneQuantity: doneQuantity === null ? 0 : Number(doneQuantity) || 0,
+            done: !!doneBool,
+            inventory,
+            defected,
+            tag,
+          };
+        })
+        .filter(Boolean);
+
+      allStock.push(...batch);
+      hasMore = !!resp.has_more;
+      startCursor = resp.next_cursor || undefined;
+    }
+
+    // Keep rows that have either a positive "<School> Done" value OR any inventory value.
+    const filtered = (allStock || []).filter(
+      (it) => Number(it.doneQuantity) > 0 || (it.inventory !== null && Number(it.inventory) >= 0) || (it.defected !== null && Number(it.defected) >= 0),
+    );
+
+    return {
+      meta: {
+        schoolName,
+        donePropName,
+        inventoryPropName,
+        inventoryDate,
+        defectedPropName,
+        defectedDate,
+      },
+      items: filtered,
+    };
+  });
+}
+
+app.get(
+  "/api/b2b/schools",
+  requireAuth,
+  requirePage("B2B"),
+  async (req, res) => {
+    if (!b2bDatabaseId) {
+      return res.status(500).json({ error: "B2B database ID is not configured." });
+    }
+    res.set("Cache-Control", "no-store");
+    try {
+      const list = await _getB2BSchoolsList();
+      return res.json(Array.isArray(list) ? list : []);
+    } catch (e) {
+      const notionBody = e?.body || null;
+      console.error("Error fetching B2B schools:", notionBody || e);
+      // Common root causes:
+      // - B2B env contains a full Notion URL (handled by _extractNotionIdFromEnv)
+      // - Notion integration is not shared with the B2B database (returns 404)
+      const msg =
+        (notionBody && (notionBody.message || notionBody?.error)) ||
+        e?.message ||
+        "Failed to fetch B2B schools.";
+      return res.status(500).json({
+        error: "Failed to fetch B2B schools.",
+        details: msg,
+      });
+    }
+  },
+);
+
+app.get(
+  "/api/b2b/schools/:id",
+  requireAuth,
+  requirePage("B2B"),
+  async (req, res) => {
+    if (!b2bDatabaseId) {
+      return res.status(500).json({ error: "B2B database ID is not configured." });
+    }
+    res.set("Cache-Control", "no-store");
+
+    const id = String(req.params.id || "").trim();
+    if (!id) return res.status(400).json({ error: "Missing school id." });
+
+    try {
+      // v2: include Grades (G1..G12) checkbox flags
+      const cacheKey = `cache:api:b2b:school:${id}:v2`;
+      const data = await cacheGetOrSet(cacheKey, 5 * 60, async () => {
+        const page = await notion.pages.retrieve({ page_id: id });
+        const props = page.properties || {};
+
+        const name = _firstTitleFromProps(props, ["School name", "Name", "School"]);
+        const location =
+          (props.Location && (props.Location.url || _firstTextFromProp(props.Location))) ||
+          (props["Google Maps"] && (props["Google Maps"].url || _firstTextFromProp(props["Google Maps"]))) ||
+          "";
+
+        const governorate =
+          _selectNameColor(props.Governorate) ||
+          _selectNameColor(props.Governorates) ||
+          _selectNameColor(props.GovernorateName) ||
+          null;
+
+        const educationSystem = (() => {
+          const a1 = _multiSelectNames(props["Education System"]);
+          if (Array.isArray(a1) && a1.length) return a1;
+          const a2 = _multiSelectNames(props["Education system"]);
+          if (Array.isArray(a2) && a2.length) return a2;
+          const a3 = _multiSelectNames(props.Education);
+          if (Array.isArray(a3) && a3.length) return a3;
+          return [];
+        })();
+
+        const programType =
+          (props["Program type"] && props["Program type"].select?.name) ||
+          (props["Program Type"] && props["Program Type"].select?.name) ||
+          (props.Program && props.Program.select?.name) ||
+          "";
+
+        // Grades (G1..G12) — checkbox columns in the B2B Schools Notion DB
+        const grades = (() => {
+          const out = {};
+          for (let i = 1; i <= 12; i++) {
+            const key =
+              _findPropNameByNorm(props, `G${i}`) ||
+              _findPropNameByNorm(props, `Grade ${i}`) ||
+              null;
+            out[i] = key ? _boolFrom(props[key]) : false;
+          }
+          return out;
+        })();
+
+        return {
+          id: page.id,
+          name: name || "Untitled",
+          location,
+          governorate,
+          educationSystem,
+          programType,
+          grades,
+        };
+      });
+
+      return res.json(data);
+    } catch (e) {
+      console.error("Error fetching B2B school details:", e?.body || e);
+      return res.status(500).json({ error: "Failed to fetch school details." });
+    }
+  },
+);
+
+app.get(
+  "/api/b2b/schools/:id/stock",
+  requireAuth,
+  requirePage("B2B"),
+  async (req, res) => {
+    if (!stocktakingDatabaseId) {
+      return res.status(500).json({ error: "Stocktaking database ID is not configured." });
+    }
+    const id = String(req.params.id || "").trim();
+    if (!id) return res.status(400).json({ error: "Missing school id." });
+
+    res.set("Cache-Control", "no-store");
+
+    try {
+      const payload = await _getB2BSchoolStocktakingPayload(id);
+      return res.json(payload && typeof payload === 'object' ? payload : { meta: {}, items: [] });
+    } catch (e) {
+      console.error("Error fetching B2B stocktaking:", e?.body || e);
+      return res.status(500).json({ error: "Failed to fetch stocktaking data." });
+    }
+  },
+);
+
+// ===== B2B — Verify Admin password (Team Members DB) =====
+// Frontend uses this to protect "Make inventory" / "Finish inventory" actions.
+app.post(
+  "/api/b2b/admin/verify",
+  requireAuth,
+  requirePage("B2B"),
+  async (req, res) => {
+    if (!teamMembersDatabaseId) {
+      return res
+        .status(500)
+        .json({ error: "Team_Members database ID is not configured." });
+    }
+
+    const password = String(req?.body?.password || "").trim();
+    if (!password) return res.status(400).json({ error: "Missing password." });
+
+    res.set("Cache-Control", "no-store");
+
+    try {
+      const response = await notion.databases.query({
+        database_id: teamMembersDatabaseId,
+        page_size: 1,
+        filter: { property: "Name", title: { equals: "Admin" } },
+      });
+
+      const admin = response?.results?.[0] || null;
+      if (!admin) return res.status(404).json({ error: "Admin user not found." });
+
+      const storedPassword = admin?.properties?.Password?.number;
+      if (storedPassword === null || typeof storedPassword === "undefined") {
+        return res.status(500).json({ error: "Admin password is not set." });
+      }
+
+      const ok = String(storedPassword) === password;
+      if (!ok) return res.status(401).json({ error: "Invalid password." });
+
+      return res.json({ ok: true });
+    } catch (e) {
+      console.error("Error verifying Admin password:", e?.body || e);
+      return res.status(500).json({ error: "Failed to verify password." });
+    }
+  },
+);
+
+// ===== B2B — Create (or get) today's inventory column for a school =====
+// Creates a new Number property in the School Stocktaking database:
+//   "<School> Inventory YYYY-MM-DD"
+app.post(
+  "/api/b2b/schools/:id/inventory",
+  requireAuth,
+  requirePage("B2B"),
+  async (req, res) => {
+    if (!stocktakingDatabaseId) {
+      return res.status(500).json({ error: "Stocktaking database ID is not configured." });
+    }
+
+    const id = String(req.params.id || "").trim();
+    if (!id) return res.status(400).json({ error: "Missing school id." });
+
+    res.set("Cache-Control", "no-store");
+
+    try {
+      const school = await _getB2BSchoolById(id);
+      if (!school) return res.status(404).json({ error: "School not found." });
+
+      const schoolName = String(school.name || "").trim();
+      if (!schoolName) return res.status(400).json({ error: "Invalid school name." });
+
+      const dateISO = _cairoDateISO(new Date());
+      const inventoryPropName = await _ensureInventoryPropExists({
+        schoolName,
+        dateISO,
+      });
+
+      const defectedPropName = await _ensureDefectedPropExists({
+        schoolName,
+        dateISO,
+      });
+
+      // Invalidate school stock cache so UI shows the new columns immediately.
+      try {
+        await cacheDel(`cache:api:b2b:school-stock:${id}:v5`);
+      } catch {}
+
+      return res.json({
+        ok: true,
+        inventoryPropName,
+        inventoryDate: dateISO,
+        defectedPropName,
+        defectedDate: dateISO,
+      });
+    } catch (e) {
+      console.error("Error creating B2B inventory column:", e?.body || e);
+      const msg = e?.body?.message || e?.message || "Failed to create inventory column.";
+      return res.status(500).json({ error: "Failed to create inventory column.", details: msg });
+    }
+  },
+);
+
+// ===== B2B — Update inventory value for a single stock item (row) =====
+// Writes the number into the latest inventory column for the school.
+app.patch(
+  "/api/b2b/schools/:id/stock/:stockId/inventory",
+  requireAuth,
+  requirePage("B2B"),
+  async (req, res) => {
+    if (!stocktakingDatabaseId) {
+      return res.status(500).json({ error: "Stocktaking database ID is not configured." });
+    }
+
+    const schoolId = String(req.params.id || "").trim();
+    const stockId = String(req.params.stockId || "").trim();
+    if (!schoolId) return res.status(400).json({ error: "Missing school id." });
+    if (!stockId) return res.status(400).json({ error: "Missing stock item id." });
+
+    const raw = req?.body?.value;
+    const value = raw === null || typeof raw === "undefined" || raw === "" ? null : Number(raw);
+    if (value !== null && (!Number.isFinite(value) || value < 0)) {
+      return res.status(400).json({ error: "Invalid inventory value." });
+    }
+
+    res.set("Cache-Control", "no-store");
+
+    try {
+      const school = await _getB2BSchoolById(schoolId);
+      if (!school) return res.status(404).json({ error: "School not found." });
+      const schoolName = String(school.name || "").trim();
+      if (!schoolName) return res.status(400).json({ error: "Invalid school name." });
+
+      // Prefer the inventory column requested by the client (if provided),
+      // then fall back to the latest existing inventory column; if none exists, create today's.
+      const schemaProps = await _getStocktakingDBProps();
+      const requestedInvProp = typeof req?.body?.inventoryPropName === "string" ? String(req.body.inventoryPropName).trim() : "";
+      const requestedInvDate = typeof req?.body?.inventoryDate === "string" ? String(req.body.inventoryDate).trim() : "";
+
+      let inventoryPropName = null;
+      let inventoryDate = null;
+
+      if (requestedInvProp) {
+        inventoryPropName = _findPropNameByNorm(schemaProps, requestedInvProp) || (schemaProps?.[requestedInvProp] ? requestedInvProp : null);
+        if (inventoryPropName) {
+          const m = String(inventoryPropName).match(/\b(\d{4}-\d{2}-\d{2})\b/);
+          inventoryDate = m ? m[1] : null;
+        }
+      }
+
+      if (!inventoryPropName && requestedInvDate) {
+        const candidate = _makeInventoryPropName(schoolName, requestedInvDate);
+        inventoryPropName = _findPropNameByNorm(schemaProps, candidate) || (schemaProps?.[candidate] ? candidate : null);
+        inventoryDate = inventoryPropName ? requestedInvDate : null;
+      }
+
+      if (!inventoryPropName) {
+        const latestInv = _findLatestInventoryProp(schemaProps, schoolName);
+        inventoryPropName = latestInv?.name || null;
+        inventoryDate = latestInv?.date || null;
+      }
+
+      if (!inventoryPropName) {
+        const dateISO = _cairoDateISO(new Date());
+        inventoryPropName = await _ensureInventoryPropExists({ schoolName, dateISO });
+        inventoryDate = dateISO;
+      }
+
+      await notion.pages.update({
+        page_id: stockId,
+        properties: {
+          [inventoryPropName]: { number: value },
+        },
+      });
+
+      // Invalidate school stock cache so UI reflects updates.
+      try {
+        await cacheDel(`cache:api:b2b:school-stock:${schoolId}:v5`);
+      } catch {}
+
+      return res.json({ ok: true, inventoryPropName, inventoryDate, value });
+    } catch (e) {
+      console.error("Error updating B2B inventory value:", e?.body || e);
+      const msg = e?.body?.message || e?.message || "Failed to update inventory.";
+      return res.status(500).json({ error: "Failed to update inventory.", details: msg });
+    }
+  },
+);
+
+
+
+// ===== B2B — Update defected value for a single stock item (row) =====
+// Writes the number into the latest defected column for the school.
+app.patch(
+  "/api/b2b/schools/:id/stock/:stockId/defected",
+  requireAuth,
+  requirePage("B2B"),
+  async (req, res) => {
+    if (!stocktakingDatabaseId) {
+      return res.status(500).json({ error: "Stocktaking database ID is not configured." });
+    }
+
+    const schoolId = String(req.params.id || "").trim();
+    const stockId = String(req.params.stockId || "").trim();
+    if (!schoolId) return res.status(400).json({ error: "Missing school id." });
+    if (!stockId) return res.status(400).json({ error: "Missing stock item id." });
+
+    const raw = req?.body?.value;
+    const value = raw === null || typeof raw === "undefined" || raw === "" ? null : Number(raw);
+    if (value !== null && (!Number.isFinite(value) || value < 0)) {
+      return res.status(400).json({ error: "Invalid defected value." });
+    }
+
+    res.set("Cache-Control", "no-store");
+
+    try {
+      const school = await _getB2BSchoolById(schoolId);
+      if (!school) return res.status(404).json({ error: "School not found." });
+      const schoolName = String(school.name || "").trim();
+      if (!schoolName) return res.status(400).json({ error: "Invalid school name." });
+
+      const schemaProps = await _getStocktakingDBProps();
+      const requestedDefProp = typeof req?.body?.defectedPropName === "string" ? String(req.body.defectedPropName).trim() : "";
+      const requestedDefDate = typeof req?.body?.defectedDate === "string" ? String(req.body.defectedDate).trim() : "";
+
+      let defectedPropName = null;
+      let defectedDate = null;
+
+      if (requestedDefProp) {
+        defectedPropName =
+          _findPropNameByNorm(schemaProps, requestedDefProp) ||
+          (schemaProps?.[requestedDefProp] ? requestedDefProp : null);
+        if (defectedPropName) {
+          const m = String(defectedPropName).match(/\b(\d{4}-\d{2}-\d{2})\b/);
+          defectedDate = m ? m[1] : null;
+        }
+      }
+
+      if (!defectedPropName && requestedDefDate) {
+        const candidate = _makeDefectedPropName(schoolName, requestedDefDate);
+        defectedPropName =
+          _findPropNameByNorm(schemaProps, candidate) ||
+          (schemaProps?.[candidate] ? candidate : null);
+        defectedDate = defectedPropName ? requestedDefDate : null;
+      }
+
+      if (!defectedPropName) {
+        const latestDef = _findLatestDefectedProp(schemaProps, schoolName);
+        defectedPropName = latestDef?.name || null;
+        defectedDate = latestDef?.date || null;
+      }
+
+      if (!defectedPropName) {
+        const dateISO = _cairoDateISO(new Date());
+        defectedPropName = await _ensureDefectedPropExists({ schoolName, dateISO });
+        defectedDate = dateISO;
+      }
+
+      await notion.pages.update({
+        page_id: stockId,
+        properties: {
+          [defectedPropName]: { number: value },
+        },
+      });
+
+      // Invalidate school stock cache so UI reflects updates.
+      try {
+        await cacheDel(`cache:api:b2b:school-stock:${schoolId}:v5`);
+      } catch {}
+
+      return res.json({ ok: true, defectedPropName, defectedDate, value });
+    } catch (e) {
+      console.error("Error updating B2B defected value:", e?.body || e);
+      const msg = e?.body?.message || e?.message || "Failed to update defected.";
+      return res.status(500).json({ error: "Failed to update defected.", details: msg });
+    }
+  },
+);
+
+
+// ===== B2B School Stocktaking — PDF download (same template as /stocktaking) =====
+app.get(
+  "/api/b2b/schools/:id/stock/pdf",
+  requireAuth,
+  requirePage("B2B"),
+  async (req, res) => {
+    if (!stocktakingDatabaseId) {
+      return res.status(500).json({ error: "Stocktaking database ID is not configured." });
+    }
+
+    const id = String(req.params.id || "").trim();
+    if (!id) return res.status(400).json({ error: "Missing school id." });
+
+    res.set("Cache-Control", "no-store");
+
+    try {
+      const { meta, items } = await _getB2BSchoolStocktakingPayload(id);
+      const schoolName = String(meta?.schoolName || "School").trim() || "School";
+
+      // Columns selection
+      // - Download PDF button (no query) should show Done only (no Inventory/Defected)
+      // - Finish Inventory modal uses: ?cols=inventory | defected | both
+      //
+      // Supported values:
+      // ?cols=done|none        -> Done only (hide Inventory & Defected)
+      // ?cols=inventory|inv    -> Inventory only
+      // ?cols=defected|def     -> Defected only
+      // ?cols=both             -> Inventory & Defected (default when cols is provided but invalid)
+      const hasColsParam = !!(req.query && Object.prototype.hasOwnProperty.call(req.query, "cols"));
+      const colsReqRaw = String(hasColsParam ? (req.query && req.query.cols) : "done")
+        .toLowerCase()
+        .trim();
+
+      let includeInventoryCol = true;
+      let includeDefectedCol = true;
+
+      const doneOnly = colsReqRaw === "done" || colsReqRaw === "onlydone" || colsReqRaw === "none";
+      if (doneOnly) {
+        includeInventoryCol = false;
+        includeDefectedCol = false;
+      } else if (colsReqRaw === "inventory" || colsReqRaw === "inv") {
+        includeDefectedCol = false;
+      } else if (colsReqRaw === "defected" || colsReqRaw === "def" || colsReqRaw === "damaged") {
+        includeInventoryCol = false;
+      } else {
+        includeInventoryCol = true;
+        includeDefectedCol = true;
+      }
+
+      // Safety: don't allow both to be hidden unless explicitly requested.
+      if (!doneOnly && !includeInventoryCol && !includeDefectedCol) {
+        includeInventoryCol = true;
+        includeDefectedCol = true;
+      }
+
+      // Signature blocks:
+      // - Download PDF button should NOT include signatures blocks
+      // - Finish Inventory modal keeps signatures blocks (it sends ?cols=...)
+      const includeSignatureBlocks = hasColsParam;
+
+      // Build rows in the same shape as /api/stock/pdf
+      const filteredStockForPdf = (items || [])
+        .map((r) => ({
+          id: r.id,
+          name: r.name,
+          idCode: r.idCode,
+          quantity: Number(r.doneQuantity) || 0,
+          inventory:
+            r.inventory === null || typeof r.inventory === "undefined" ? null : Number(r.inventory),
+          defected:
+            r.defected === null || typeof r.defected === "undefined" ? null : Number(r.defected),
+          tag: r.tag,
+        }))
+        .filter((r) => {
+          const qOk = Number(r.quantity) > 0;
+          const invOk = includeInventoryCol && r.inventory !== null && Number(r.inventory) >= 0;
+          const defOk = includeDefectedCol && r.defected !== null && Number(r.defected) >= 0;
+          return qOk || invOk || defOk;
+        });
+
+      const createdAt = new Date();
+      const dateStr = createdAt.toISOString().slice(0, 10);
+      const fileName = `Stocktaking-${dateStr}.pdf`;
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+
+      const doc = new PDFDocument({ size: "A4", margin: 36 });
+      doc.pipe(res);
+
+      const logoPath = path.join(__dirname, "../public/images/logo.png");
+      const COLORS = {
+        text: "#111827",
+        muted: "#6B7280",
+        border: "#E5E7EB",
+        headerBg: "#F9FAFB",
+        tableHeadBg: "#ECFDF5",
+        tagPillBg: "#D1FAE5",
+        accent: "#065F46",
+        mismatch: "#DC2626",
+        mismatchBg: "#FEF2F2",
+      };
+
+      const normalizeTagName = (name) => {
+        const n = String(name || "").trim();
+        if (!n) return "Untagged";
+        if (n.toLowerCase() === "untagged" || n === "-") return "Untagged";
+        return n;
+      };
+
+      const notionToHex = (color = "default") => {
+        switch (color) {
+          case "gray":
+            return { bg: "#F3F4F6", text: "#374151" };
+          case "brown":
+            return { bg: "#EFEBE9", text: "#4E342E" };
+          case "orange":
+            return { bg: "#FFF7ED", text: "#9A3412" };
+          case "yellow":
+            return { bg: "#FEFCE8", text: "#854D0E" };
+          case "green":
+            return { bg: "#ECFDF5", text: "#065F46" };
+          case "blue":
+            return { bg: "#EFF6FF", text: "#1E40AF" };
+          case "purple":
+            return { bg: "#F5F3FF", text: "#5B21B6" };
+          case "pink":
+            return { bg: "#FDF2F8", text: "#9D174D" };
+          case "red":
+            return { bg: "#FEF2F2", text: "#991B1B" };
+          default:
+            return { bg: "#F3F4F6", text: "#374151" };
+        }
+      };
+
+      // Group items by tag
+      const groupMap = new Map();
+      for (const it of filteredStockForPdf) {
+        const tagName = normalizeTagName(it?.tag?.name);
+        const tagColor = it?.tag?.color || "default";
+        const key = `${tagName.toLowerCase()}|${tagColor}`;
+        if (!groupMap.has(key)) groupMap.set(key, { name: tagName, color: tagColor, items: [] });
+        groupMap.get(key).items.push(it);
+      }
+      let groups = Array.from(groupMap.values()).sort((a, b) => a.name.localeCompare(b.name));
+      const untagged = groups.filter((g) => g.name === "Untagged");
+      groups = groups.filter((g) => g.name !== "Untagged").concat(untagged);
+
+      // Layout
+      const pageW = doc.page.width;
+      const mL = doc.page.margins.left;
+      const mR = doc.page.margins.right;
+      const mB = doc.page.margins.bottom;
+      const contentW = pageW - mL - mR;
+
+      const colIdW = 70;
+      const colQtyW = 60;
+      const colInvW = includeInventoryCol ? 70 : 0;
+      const colDefW = includeDefectedCol ? 70 : 0;
+      const colCompW = contentW - colIdW - colQtyW - colInvW - colDefW;
+
+      // Page tracking for footer signatures
+      let pageNum = 1;
+
+      const sigBoxH = 54;
+      const sigFooterReserve = includeSignatureBlocks ? (sigBoxH + 20) : 0;
+
+      const bottomLimit = () => doc.page.height - mB - (pageNum === 1 ? 0 : sigFooterReserve);
+
+      const ensureSpace = (needed) => {
+        if (doc.y + needed > bottomLimit()) doc.addPage();
+      };
+
+      // Header
+      try {
+        if (fs.existsSync(logoPath)) {
+          doc.image(logoPath, mL, doc.y, { width: 42 });
+        }
+      } catch {}
+
+      const headerX = mL + 52;
+      const headerTopY = doc.y;
+
+      doc
+        .fillColor(COLORS.text)
+        .font("Helvetica-Bold")
+        .fontSize(18)
+        .text("Stocktaking", headerX, headerTopY);
+
+      doc
+        .fillColor(COLORS.muted)
+        .font("Helvetica")
+        .fontSize(10)
+        .text(`School: ${schoolName}  •  Generated: ${formatDateTime(createdAt)}`, headerX, headerTopY + 22);
+
+      doc.moveDown(1.2);
+      doc
+        .moveTo(mL, doc.y)
+        .lineTo(pageW - mR, doc.y)
+        .lineWidth(1)
+        .strokeColor(COLORS.border)
+        .stroke();
+      doc.moveDown(0.8);
+
+      // Handover confirmation title
+      doc
+        .fillColor(COLORS.text)
+        .font("Helvetica-Bold")
+        .fontSize(14)
+        .text("Handover Confirmation", mL, doc.y);
+
+      doc
+        .fillColor(COLORS.muted)
+        .font("Helvetica")
+        .fontSize(9)
+        .text(
+          "I hereby confirm receiving the below items in good condition. Any discrepancies were noted at delivery.",
+          mL,
+          doc.y + 4,
+          { width: contentW },
+        );
+
+      doc.moveDown(1.1);
+
+      // Meta info boxes
+      const boxH = 32;
+      const boxGap = 12;
+      const boxW = (contentW - boxGap) / 2;
+      const boxY = doc.y;
+      const drawInfoBox = (x, title, value) => {
+        doc
+          .roundedRect(x, boxY, boxW, boxH, 8)
+          .fillColor(COLORS.headerBg)
+          .fill();
+        doc
+          .roundedRect(x, boxY, boxW, boxH, 8)
+          .strokeColor(COLORS.border)
+          .stroke();
+        doc
+          .fillColor(COLORS.muted)
+          .font("Helvetica-Bold")
+          .fontSize(9)
+          .text(title, x + 10, boxY + 6);
+        doc
+          .fillColor(COLORS.text)
+          .font("Helvetica")
+          .fontSize(10)
+          .text(String(value || "-"), x + 10, boxY + 18, { width: boxW - 20 });
+      };
+      drawInfoBox(mL, "School", schoolName);
+      drawInfoBox(mL + boxW + boxGap, "Date", formatDateTime(createdAt));
+      doc.y = boxY + boxH + 16;
+
+      // Signature blocks
+      const drawSigBox = (x, y, title, linesCount = 1) => {
+        doc
+          .roundedRect(x, y, boxW, sigBoxH, 8)
+          .strokeColor(COLORS.border)
+          .stroke();
+        doc
+          .fillColor(COLORS.muted)
+          .font("Helvetica-Bold")
+          .fontSize(9)
+          .text(title, x + 10, y + 8);
+
+        const firstLineY = y + 30;
+        const gap = 12;
+        for (let i = 0; i < Math.max(1, Number(linesCount) || 1); i++) {
+          const lineY = firstLineY + i * gap;
+          doc
+            .moveTo(x + 10, lineY)
+            .lineTo(x + boxW - 10, lineY)
+            .lineWidth(1)
+            .strokeColor(COLORS.border)
+            .stroke();
+        }
+      };
+
+      const drawSignaturesAt = (y) => {
+        drawSigBox(mL, y, "Inventory Team Names / Signatures", 2);
+        drawSigBox(mL + boxW + boxGap, y, "Stockholder Name / Signature", 2);
+      };
+
+      // First page: keep signatures near the top (as-is)
+      if (includeSignatureBlocks) {
+        const sigY = doc.y;
+        drawSignaturesAt(sigY);
+        doc.y = sigY + sigBoxH + 18;
+      } else {
+        // Small spacing so the table doesn't stick to the meta boxes
+        doc.moveDown(0.5);
+      }
+
+      // Pages 2+: draw signatures in the footer (bottom of each page)
+      // IMPORTANT: drawing the footer must not move the writing cursor (doc.x/doc.y),
+      // otherwise subsequent content will start at the bottom and the PDF will look broken.
+      doc.on("pageAdded", () => {
+        pageNum += 1;
+
+        if (includeSignatureBlocks && pageNum >= 2) {
+          const prevX = doc.x;
+          const prevY = doc.y;
+
+          const footerY = doc.page.height - mB - sigBoxH;
+          drawSignaturesAt(footerY);
+
+          // Restore cursor position (top of new page)
+          doc.x = prevX;
+          doc.y = prevY;
+        }
+      });
+
+      if (!groups.length) {
+        doc
+          .fillColor(COLORS.muted)
+          .font("Helvetica")
+          .fontSize(11)
+          .text("No stock data found.", mL, doc.y);
+        doc.end();
+        return;
+      }
+
+      const drawGroupHeader = (tagName, tagColor, count) => {
+        const y = doc.y;
+        const pill = notionToHex(tagColor);
+        const pillText = `Tag   ${tagName}`;
+
+        // section background should match the tag background
+        doc
+          .roundedRect(mL, y, contentW, 28, 10)
+          .fillColor(pill.bg)
+          .fill();
+
+        // tag label (same background — pill is visually merged)
+        doc
+          .roundedRect(mL + 10, y + 6, Math.min(280, doc.widthOfString(pillText) + 18), 16, 8)
+          .fillColor(pill.bg)
+          .fill();
+        doc
+          .fillColor(pill.text)
+          .font("Helvetica-Bold")
+          .fontSize(9)
+          .text(pillText, mL + 18, y + 9);
+
+        // count pill (subtle)
+        const countText = `${count} items`;
+        const countW = doc.widthOfString(countText) + 18;
+        doc
+          .roundedRect(mL + contentW - countW - 10, y + 6, countW, 16, 8)
+          .fillColor(pill.bg)
+          .fill();
+        doc
+          .roundedRect(mL + contentW - countW - 10, y + 6, countW, 16, 8)
+          .strokeColor(COLORS.border)
+          .stroke();
+        doc
+          .fillColor(COLORS.text)
+          .font("Helvetica-Bold")
+          .fontSize(9)
+          .text(countText, mL + contentW - countW - 10 + 9, y + 9);
+
+        doc.y = y + 34;
+        return pill;
+      };
+
+      const drawTableHeader = (pill) => {
+        const y = doc.y;
+        const bg = pill?.bg || COLORS.tableHeadBg;
+        const txt = pill?.text || COLORS.accent;
+
+        doc
+          .rect(mL, y, contentW, 20)
+          .fillColor(bg)
+          .fill();
+
+        doc
+          .fillColor(txt)
+          .font("Helvetica-Bold")
+          .fontSize(9)
+          .text("ID Code", mL + 8, y + 6, { width: colIdW - 10 });
+        doc
+          .fillColor(txt)
+          .font("Helvetica-Bold")
+          .fontSize(9)
+          .text("Component", mL + colIdW, y + 6, { width: colCompW - 10 });
+        doc
+          .fillColor(txt)
+          .font("Helvetica-Bold")
+          .fontSize(9)
+          .text("In Stock", mL + colIdW + colCompW, y + 6, { width: colQtyW - 10, align: "right" });
+        if (includeInventoryCol) {
+          doc
+            .fillColor(txt)
+            .font("Helvetica-Bold")
+            .fontSize(9)
+            .text("Inventory", mL + colIdW + colCompW + colQtyW, y + 6, { width: colInvW - 10, align: "right" });
+        }
+        if (includeDefectedCol) {
+          const defX = mL + colIdW + colCompW + colQtyW + (includeInventoryCol ? colInvW : 0);
+          doc
+            .fillColor(txt)
+            .font("Helvetica-Bold")
+            .fontSize(9)
+            .text("Defected", defX, y + 6, { width: colDefW - 10, align: "right" });
+        }
+
+        doc.y = y + 24;
+      };
+
+      const drawRow = (item) => {
+        const y = doc.y;
+        const rowH = 20;
+
+        // Mismatch highlight background
+        const invHasValue = includeInventoryCol && item.inventory !== null && typeof item.inventory !== "undefined";
+        const mismatch = includeInventoryCol && invHasValue && Number(item.inventory) !== Number(item.quantity);
+        if (mismatch) {
+          doc
+            .rect(mL, y, contentW, rowH)
+            .fillColor(COLORS.mismatchBg)
+            .fill();
+        }
+
+        // Text
+        doc
+          .fillColor(COLORS.text)
+          .font("Helvetica")
+          .fontSize(9)
+          .text(String(item.idCode || ""), mL + 8, y + 6, { width: colIdW - 10 });
+        doc
+          .fillColor(COLORS.text)
+          .font("Helvetica")
+          .fontSize(9)
+          .text(String(item.name || "-"), mL + colIdW, y + 6, { width: colCompW - 10 });
+        doc
+          .fillColor(COLORS.text)
+          .font("Helvetica")
+          .fontSize(9)
+          .text(String(item.quantity ?? 0), mL + colIdW + colCompW, y + 6, { width: colQtyW - 10, align: "right" });
+
+        const afterQtyX = mL + colIdW + colCompW + colQtyW;
+        const invX = afterQtyX;
+        const defX = afterQtyX + (includeInventoryCol ? colInvW : 0);
+
+        if (includeInventoryCol) {
+          if (invHasValue) {
+            doc
+              .fillColor(mismatch ? COLORS.mismatch : COLORS.text)
+              .font("Helvetica")
+              .fontSize(9)
+              .text(String(Number(item.inventory)), invX, y + 6, {
+                width: colInvW - 10,
+                align: "right",
+              });
+          } else {
+            // underline for handwritten inventory
+            const lineY = y + 14;
+            doc
+              .moveTo(invX + 8, lineY)
+              .lineTo(invX + colInvW - 8, lineY)
+              .lineWidth(0.8)
+              .strokeColor(COLORS.border)
+              .stroke();
+          }
+        }
+
+        if (includeDefectedCol) {
+          const defHasValue = item.defected !== null && typeof item.defected !== "undefined";
+          if (defHasValue) {
+            doc
+              .fillColor(COLORS.text)
+              .font("Helvetica")
+              .fontSize(9)
+              .text(String(Number(item.defected)), defX, y + 6, {
+                width: colDefW - 10,
+                align: "right",
+              });
+          } else {
+            // underline for handwritten defected
+            const lineY = y + 14;
+            doc
+              .moveTo(defX + 8, lineY)
+              .lineTo(defX + colDefW - 8, lineY)
+              .lineWidth(0.8)
+              .strokeColor(COLORS.border)
+              .stroke();
+          }
+        }
+
+        // separator
+        doc
+          .moveTo(mL, y + rowH)
+          .lineTo(mL + contentW, y + rowH)
+          .lineWidth(1)
+          .strokeColor("#F3F4F6")
+          .stroke();
+
+        doc.y = y + rowH + 2;
+      };
+
+      for (const group of groups) {
+        ensureSpace(60);
+        const pill = drawGroupHeader(group.name, group.color, group.items.length);
+        drawTableHeader(pill);
+
+        (group.items || [])
+          .slice()
+          .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")))
+          .forEach((it) => {
+            ensureSpace(28);
+            drawRow(it);
+          });
+
+        doc.moveDown(0.5);
+      }
+
+      doc.end();
+    } catch (e) {
+      console.error("B2B PDF generation error:", e?.body || e);
+      return res.status(500).json({ error: "Failed to generate PDF" });
+    }
+  },
+);
+
+// ===== B2B School Stocktaking — Excel download (same template as /stocktaking) =====
+app.get(
+  "/api/b2b/schools/:id/stock/excel",
+  requireAuth,
+  requirePage("B2B"),
+  async (req, res) => {
+    if (!stocktakingDatabaseId) {
+      return res.status(500).json({ error: "Stocktaking database ID is not configured." });
+    }
+
+    const id = String(req.params.id || "").trim();
+    if (!id) return res.status(400).json({ error: "Missing school id." });
+
+    res.set("Cache-Control", "no-store");
+
+    try {
+      const { meta, items } = await _getB2BSchoolStocktakingPayload(id);
+      const schoolName = String(meta?.schoolName || "School").trim() || "School";
+
+      // Columns selection (used by Finish Inventory modal)
+      // ?cols=inventory | defected | both
+      const colsReqRaw = String((req.query && req.query.cols) || "both").toLowerCase().trim();
+      let includeInventoryCol = true;
+      let includeDefectedCol = true;
+      if (colsReqRaw === "inventory" || colsReqRaw === "inv") {
+        includeDefectedCol = false;
+      } else if (colsReqRaw === "defected" || colsReqRaw === "def" || colsReqRaw === "damaged") {
+        includeInventoryCol = false;
+      } else {
+        includeInventoryCol = true;
+        includeDefectedCol = true;
+      }
+
+      // Safety: don't allow both to be hidden.
+      if (!includeInventoryCol && !includeDefectedCol) {
+        includeInventoryCol = true;
+        includeDefectedCol = true;
+      }
+
+      // Sort by tag then component name (same as /api/stock/excel)
+      const rows = (items || [])
+        .map((r) => ({
+          id: r.id,
+          name: r.name,
+          idCode: r.idCode,
+          tag: r.tag,
+          quantity: Number(r.doneQuantity) || 0,
+          inventory:
+            r.inventory === null || typeof r.inventory === "undefined" ? null : Number(r.inventory),
+          defected:
+            r.defected === null || typeof r.defected === "undefined" ? null : Number(r.defected),
+        }))
+        .filter((r) => {
+          const qOk = Number(r.quantity) > 0;
+          const invOk = includeInventoryCol && r.inventory !== null && Number(r.inventory) >= 0;
+          const defOk = includeDefectedCol && r.defected !== null && Number(r.defected) >= 0;
+          return qOk || invOk || defOk;
+        })
+        .slice()
+        .sort((a, b) => {
+          const ta = String(a?.tag?.name || "Untagged");
+          const tb = String(b?.tag?.name || "Untagged");
+          if (ta !== tb) return ta.localeCompare(tb);
+          return String(a?.name || "").localeCompare(String(b?.name || ""));
+        });
+
+      const ExcelJS = require("exceljs");
+      const wb = new ExcelJS.Workbook();
+      wb.creator = "Operations Hub";
+      const ws = wb.addWorksheet("Stocktaking");
+
+      const createdAt = new Date();
+      const formattedDate = formatDateTime(createdAt);
+
+      // Dynamic columns (based on cols selection)
+      const columns = ["Tag", "ID Code", "Component", "In Stock"];
+      if (includeInventoryCol) columns.push("Inventory");
+      if (includeDefectedCol) columns.push("Defected");
+      columns.push("Unity Price");
+
+      const colLetter = (n) => {
+        let num = Math.max(1, Number(n) || 1);
+        let s = "";
+        while (num > 0) {
+          const m = (num - 1) % 26;
+          s = String.fromCharCode(65 + m) + s;
+          num = Math.floor((num - 1) / 26);
+        }
+        return s;
+      };
+
+      const lastCol = colLetter(columns.length);
+      const split = Math.ceil(columns.length / 2);
+      const leftEnd = colLetter(split);
+      const rightStart = colLetter(split + 1);
+
+      const safeSchool = String(schoolName)
+        .replace(/[<>:"/\\|?*]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .replace(/\s/g, "_")
+        .slice(0, 50);
+      const fileName = `stocktaking_${safeSchool || "School"}.xlsx`;
+
+      // Title row
+      ws.mergeCells(`A1:${lastCol}1`);
+      ws.getCell("A1").value = "Stocktaking";
+      ws.getCell("A1").font = { size: 18, bold: true };
+      ws.getCell("A1").alignment = { vertical: "middle", horizontal: "center" };
+      ws.getRow(1).height = 28;
+
+      // Subtitle row
+      ws.mergeCells(`A2:${lastCol}2`);
+      ws.getCell("A2").value = `School: ${schoolName}  •  Generated: ${formattedDate}`;
+      ws.getCell("A2").font = { size: 10, color: { argb: "FF6B7280" } };
+      ws.getCell("A2").alignment = { vertical: "middle", horizontal: "center" };
+      ws.getRow(2).height = 18;
+
+      // Spacer
+      ws.addRow([]);
+
+      // Handover confirmation section
+      ws.mergeCells(`A4:${lastCol}4`);
+      ws.getCell("A4").value = "Handover Confirmation";
+      ws.getCell("A4").font = { size: 14, bold: true };
+      ws.getCell("A4").alignment = { vertical: "middle", horizontal: "left" };
+
+      ws.mergeCells(`A5:${lastCol}5`);
+      ws.getCell("A5").value =
+        "I hereby confirm receiving the below items in good condition. Any discrepancies were noted at delivery.";
+      ws.getCell("A5").font = { size: 9, color: { argb: "FF6B7280" } };
+      ws.getCell("A5").alignment = { wrapText: true, vertical: "top" };
+      ws.getRow(5).height = 28;
+
+      // Info boxes (School / Date)
+      ws.getRow(6).height = 22;
+      ws.mergeCells(`A6:${leftEnd}6`);
+      ws.mergeCells(`${rightStart}6:${lastCol}6`);
+      ws.getCell("A6").value = `School: ${schoolName}`;
+      ws.getCell(`${rightStart}6`).value = `Date: ${formattedDate}`;
+      ["A6", `${rightStart}6`].forEach((addr) => {
+        const c = ws.getCell(addr);
+        c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF9FAFB" } };
+        c.border = {
+          top: { style: "thin", color: { argb: "FFE5E7EB" } },
+          left: { style: "thin", color: { argb: "FFE5E7EB" } },
+          bottom: { style: "thin", color: { argb: "FFE5E7EB" } },
+          right: { style: "thin", color: { argb: "FFE5E7EB" } },
+        };
+        c.font = { size: 10, bold: true };
+        c.alignment = { vertical: "middle", horizontal: "left" };
+      });
+
+      // Signature boxes
+      ws.getRow(7).height = 26;
+      ws.mergeCells(`A7:${leftEnd}7`);
+      ws.mergeCells(`${rightStart}7:${lastCol}7`);
+      ws.getCell("A7").value = "Inventory Team Names / Signatures";
+      ws.getCell(`${rightStart}7`).value = "Stockholder Name / Signature";
+      ["A7", `${rightStart}7`].forEach((addr) => {
+        const c = ws.getCell(addr);
+        c.border = {
+          top: { style: "thin", color: { argb: "FFE5E7EB" } },
+          left: { style: "thin", color: { argb: "FFE5E7EB" } },
+          bottom: { style: "thin", color: { argb: "FFE5E7EB" } },
+          right: { style: "thin", color: { argb: "FFE5E7EB" } },
+        };
+        c.font = { size: 9, bold: true, color: { argb: "FF6B7280" } };
+        c.alignment = { vertical: "middle", horizontal: "left" };
+      });
+      // Signature line row
+      ws.getRow(8).height = 18;
+      ws.mergeCells(`A8:${leftEnd}8`);
+      ws.mergeCells(`${rightStart}8:${lastCol}8`);
+      ["A8", `${rightStart}8`].forEach((addr) => {
+        const c = ws.getCell(addr);
+        c.border = { bottom: { style: "thin", color: { argb: "FFE5E7EB" } } };
+      });
+
+      // Spacer
+      ws.addRow([]);
+
+      // Table header
+      const headerRowIndex = ws.lastRow.number + 1;
+      ws.addRow(columns);
+      const headerRow = ws.getRow(headerRowIndex);
+      headerRow.font = { bold: true, color: { argb: "FF065F46" } };
+      headerRow.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFECFDF5" } };
+      headerRow.alignment = { vertical: "middle", horizontal: "left" };
+      headerRow.height = 20;
+      headerRow.eachCell((cell) => {
+        cell.border = {
+          top: { style: "thin", color: { argb: "FFE5E7EB" } },
+          left: { style: "thin", color: { argb: "FFE5E7EB" } },
+          bottom: { style: "thin", color: { argb: "FFE5E7EB" } },
+          right: { style: "thin", color: { argb: "FFE5E7EB" } },
+        };
+      });
+
+      // Column widths (based on selected columns)
+      const widthByHeader = {
+        "Tag": 32,
+        "ID Code": 14,
+        "Component": 52,
+        "In Stock": 12,
+        "Inventory": 12,
+        "Defected": 12,
+        "Unity Price": 14,
+      };
+      columns.forEach((h, idx) => {
+        ws.getColumn(idx + 1).width = widthByHeader[h] || 12;
+      });
+
+      // Unit price map (same as /api/stock/excel)
+      const unitPriceMap = await _getProductsNameToUnityPriceMap();
+      const unitPriceOf = (componentName) => {
+        const n = unitPriceMap.get(_normNameKey(componentName));
+        if (typeof n === "number" && Number.isFinite(n)) return n;
+        return null;
+      };
+
+      // Notion tag color map for Excel
+      const notionColorToARGB = (color = "default") => {
+        switch (color) {
+          case "gray":
+            return { fg: "FFF3F4F6", text: "FF374151" };
+          case "brown":
+            return { fg: "FFEFEBE9", text: "FF4E342E" };
+          case "orange":
+            return { fg: "FFFFF7ED", text: "FF9A3412" };
+          case "yellow":
+            return { fg: "FFFEFCE8", text: "FF854D0E" };
+          case "green":
+            return { fg: "FFECFDF5", text: "FF065F46" };
+          case "blue":
+            return { fg: "FFEFF6FF", text: "FF1E40AF" };
+          case "purple":
+            return { fg: "FFF5F3FF", text: "FF5B21B6" };
+          case "pink":
+            return { fg: "FFFDF2F8", text: "FF9D174D" };
+          case "red":
+            return { fg: "FFFEF2F2", text: "FF991B1B" };
+          default:
+            return { fg: "FFF3F4F6", text: "FF374151" };
+        }
+      };
+
+      // Data rows
+      for (const r of rows) {
+        const tagName = r?.tag?.name || "Untagged";
+        const tagColor = r?.tag?.color || "default";
+        const price = unitPriceOf(r.name);
+        const rowValues = [
+          tagName,
+          r.idCode || "",
+          r.name || "-",
+          Number(r.quantity) || 0,
+        ];
+        if (includeInventoryCol) {
+          rowValues.push(r.inventory === null || typeof r.inventory === "undefined" ? "" : Number(r.inventory));
+        }
+        if (includeDefectedCol) {
+          rowValues.push(r.defected === null || typeof r.defected === "undefined" ? "" : Number(r.defected));
+        }
+        rowValues.push(price === null ? "" : price);
+
+        const row = ws.addRow(rowValues);
+
+        // Tag pill style
+        const tagCell = row.getCell(1);
+        const c = notionColorToARGB(tagColor);
+        tagCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: c.fg } };
+        tagCell.font = { bold: true, color: { argb: c.text } };
+        tagCell.alignment = { vertical: "middle", horizontal: "left" };
+
+        // Borders
+        row.eachCell((cell) => {
+          cell.border = {
+            top: { style: "thin", color: { argb: "FFF3F4F6" } },
+            left: { style: "thin", color: { argb: "FFF3F4F6" } },
+            bottom: { style: "thin", color: { argb: "FFF3F4F6" } },
+            right: { style: "thin", color: { argb: "FFF3F4F6" } },
+          };
+        });
+
+        // Numeric alignment
+        const idxInStock = columns.indexOf("In Stock") + 1;
+        const idxInventory = includeInventoryCol ? columns.indexOf("Inventory") + 1 : null;
+        const idxDefected = includeDefectedCol ? columns.indexOf("Defected") + 1 : null;
+        const idxPrice = columns.indexOf("Unity Price") + 1;
+
+        if (idxInStock > 0) row.getCell(idxInStock).alignment = { vertical: "middle", horizontal: "right" };
+        if (idxInventory) row.getCell(idxInventory).alignment = { vertical: "middle", horizontal: "right" };
+        if (idxDefected) row.getCell(idxDefected).alignment = { vertical: "middle", horizontal: "right" };
+        if (idxPrice > 0) row.getCell(idxPrice).alignment = { vertical: "middle", horizontal: "right" };
+
+        // Unity price format
+        if (price !== null && idxPrice > 0) {
+          row.getCell(idxPrice).numFmt = '"EGP" #,##0.00';
+        }
+      }
+
+      res.setHeader(
+        "Content-Type",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      );
+      res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+
+      await wb.xlsx.write(res);
+      res.end();
+    } catch (e) {
+      console.error("B2B Excel generation error:", e?.body || e);
+      return res.status(500).json({ error: "Failed to generate Excel" });
+    }
+  },
+);
 // Order Draft APIs — require Create New Order
 app.get(
   "/api/order-draft",
@@ -735,337 +3299,193 @@ app.get(
 
     res.set("Cache-Control", "no-store");
 
+    // Keep recentOrders trimmed (used to show a just-created order before Notion catches up)
+    const RECENT_TTL_MS = 10 * 60 * 1000;
+    let recent = Array.isArray(req.session.recentOrders)
+      ? req.session.recentOrders
+      : [];
+    recent = recent.filter(
+      (r) => Date.now() - new Date(r.createdTime).getTime() < RECENT_TTL_MS,
+    );
+    req.session.recentOrders = recent;
+
     try {
-      const userQuery = await notion.databases.query({
-        database_id: teamMembersDatabaseId,
-        filter: { property: "Name", title: { equals: req.session.username } },
-      });
-      if (userQuery.results.length === 0) {
-        return res.status(404).json({ error: "User not found." });
-      }
-      const userId = userQuery.results[0].id;
+      const userId = await getSessionUserNotionId(req);
+      if (!userId) return res.status(404).json({ error: "User not found." });
 
-      const allOrders = [];
-      let hasMore = true;
-      let startCursor = undefined;
+      // Cache the Notion-derived list briefly to make reloads fast and reduce Notion load.
+      const listCacheKey = `cache:api:orders:list:${userId}:v2`;
+      const allOrders = await cacheGetOrSet(listCacheKey, 60, async () => {
+        const rows = [];
+        let hasMore = true;
+        let startCursor = undefined;
 
-      // ----- Notion "ID" (unique_id) helpers -----
-      // We support different property names by:
-      // 1) trying a property named "ID" (case-insensitive)
-      // 2) falling back to the first property of type "unique_id"
-      const getPropInsensitive = (props, name) => {
-        if (!props || !name) return null;
-        const target = String(name).trim().toLowerCase();
-        for (const [k, v] of Object.entries(props)) {
-          if (String(k).trim().toLowerCase() === target) return v;
-        }
-        return null;
-      };
+        // ----- Notion "ID" (unique_id) helpers -----
+        // We support different property names by:
+        // 1) trying a property named "ID" (case-insensitive)
+        // 2) falling back to the first property of type "unique_id"
+        const getPropInsensitive = (props, name) => {
+          if (!props || !name) return null;
+          const target = String(name).trim().toLowerCase();
+          for (const [k, v] of Object.entries(props)) {
+            if (String(k).trim().toLowerCase() === target) return v;
+          }
+          return null;
+        };
 
-      const extractUniqueIdDetails = (prop) => {
-        try {
-          if (!prop) return { text: null, prefix: null, number: null };
+        const extractUniqueIdDetails = (prop) => {
+          try {
+            if (!prop) return { text: null, prefix: null, number: null };
 
-          // Native Notion "ID" property
-          if (prop.type === 'unique_id') {
-            const u = prop.unique_id;
-            if (!u || typeof u.number !== 'number') {
-              return { text: null, prefix: null, number: null };
+            // Native Notion "ID" property
+            if (prop.type === "unique_id") {
+              const u = prop.unique_id;
+              if (!u || typeof u.number !== "number") {
+                return { text: null, prefix: null, number: null };
+              }
+              const prefix = u.prefix ? String(u.prefix).trim() : "";
+              const number = u.number;
+              const text = prefix ? `${prefix}-${number}` : String(number);
+              return { text, prefix: prefix || null, number };
             }
-            const prefix = u.prefix ? String(u.prefix).trim() : '';
-            const number = u.number;
-            const text = prefix ? `${prefix}-${number}` : String(number);
-            return { text, prefix: prefix || null, number };
-          }
 
-          // Best-effort fallback (if "ID" is stored in another type)
-          let text = null;
-          if (prop.type === 'number' && typeof prop.number === 'number') text = String(prop.number);
-          if (prop.type === 'formula') {
-            if (prop.formula?.type === 'string') text = String(prop.formula.string || '').trim() || null;
-            if (prop.formula?.type === 'number' && typeof prop.formula.number === 'number') text = String(prop.formula.number);
-          }
-          if (prop.type === 'rich_text') {
-            text = (prop.rich_text || []).map((x) => x?.plain_text || '').join('').trim() || null;
-          }
-          if (prop.type === 'title') {
-            text = (prop.title || []).map((x) => x?.plain_text || '').join('').trim() || null;
-          }
-          if (!text) return { text: null, prefix: null, number: null };
+            // Best-effort fallback (if "ID" is stored in another type)
+            let text = null;
+            if (prop.type === "number" && typeof prop.number === "number") text = String(prop.number);
+            if (prop.type === "formula") {
+              if (prop.formula?.type === "string") text = String(prop.formula.string || "").trim() || null;
+              if (prop.formula?.type === "number" && typeof prop.formula.number === "number") text = String(prop.formula.number);
+            }
+            if (prop.type === "rich_text") {
+              text = (prop.rich_text || []).map((x) => x?.plain_text || "").join("").trim() || null;
+            }
+            if (prop.type === "title") {
+              text = (prop.title || []).map((x) => x?.plain_text || "").join("").trim() || null;
+            }
+            if (!text) return { text: null, prefix: null, number: null };
 
-          // Try to parse prefix/number from a string like "ORD-95"
-          const m = String(text).trim().match(/^(.*?)(\d+)\s*$/);
-          const prefix = m ? String(m[1] || '').replace(/[-\s]+$/, '').trim() : '';
-          const number = m ? Number(m[2]) : null;
-          return {
-            text: String(text).trim(),
-            prefix: prefix || null,
-            number: Number.isFinite(number) ? number : null,
-          };
-        } catch {
+            // Try to parse prefix/number from a string like "ORD-95"
+            const m = String(text).trim().match(/^(.*?)(\d+)\s*$/);
+            const prefix = m ? String(m[1] || "").replace(/[-\s]+$/, "").trim() : "";
+            const number = m ? Number(m[2]) : null;
+            return {
+              text: String(text).trim(),
+              prefix: prefix || null,
+              number: Number.isFinite(number) ? number : null,
+            };
+          } catch {
+            return { text: null, prefix: null, number: null };
+          }
+        };
+
+        const getOrderUniqueIdDetails = (props) => {
+          const direct = getPropInsensitive(props, "ID");
+          const d = extractUniqueIdDetails(direct);
+          if (d.text) return d;
+
+          // fallback: first unique_id property in the page
+          for (const v of Object.values(props || {})) {
+            if (v?.type === "unique_id") {
+              const x = extractUniqueIdDetails(v);
+              if (x.text) return x;
+            }
+          }
           return { text: null, prefix: null, number: null };
-        }
-      };
+        };
 
-      const getOrderUniqueIdDetails = (props) => {
-        const direct = getPropInsensitive(props, 'ID');
-        const d = extractUniqueIdDetails(direct);
-        if (d.text) return d;
+        const receivedProp = await (async () => {
+          const props = await getOrdersDBProps();
+          if (props[REC_PROP_HARDBIND] && props[REC_PROP_HARDBIND].type === "number") return REC_PROP_HARDBIND;
+          return await detectReceivedQtyPropName();
+        })();
 
-        // fallback: first unique_id property in the page
-        for (const v of Object.values(props || {})) {
-          if (v?.type === 'unique_id') {
-            const x = extractUniqueIdDetails(v);
-            if (x.text) return x;
-          }
-        }
-        return { text: null, prefix: null, number: null };
-      };
+        const productIds = new Set();
+        const memberIds = new Set();
 
-      // ----- Helper: Team member names (Created By) -----
-      const nameCache = new Map();
-      async function memberName(id) {
-        if (!id) return "";
-        if (nameCache.has(id)) return nameCache.get(id);
-        try {
-          const page = await notion.pages.retrieve({ page_id: id });
-          const nm = page.properties?.Name?.title?.[0]?.plain_text || "";
-          nameCache.set(id, nm);
-          return nm;
-        } catch {
-          return "";
-        }
-      }
-
-      // ----- Helper: extract a URL from a Notion property (url + rich_text/title fallbacks) -----
-      const extractFirstFileUrl = (prop) => {
-        try {
-          if (!prop) return null;
-          if (prop.type === "files") {
-            const f = prop.files?.[0];
-            if (!f) return null;
-            if (f.type === "file") return f.file?.url || null;
-            if (f.type === "external") return f.external?.url || null;
-            return null;
-          }
-          if (prop.type === "url") return prop.url || null;
-          return null;
-        } catch {
-          return null;
-        }
-      };
-
-      const extractUrl = (prop) => {
-        try {
-          if (!prop) return null;
-          if (prop.type === "url") return prop.url || null;
-
-          const tryText = (text) => {
-            const s = String(text || "").trim();
-            if (!s) return null;
-            if (/^https?:\/\//i.test(s)) return s;
-            return null;
-          };
-
-          if (prop.type === "rich_text") {
-            for (const rt of prop.rich_text || []) {
-              const href = rt?.href;
-              if (href) return String(href);
-              const t = tryText(rt?.plain_text);
-              if (t) return t;
-            }
-            return null;
-          }
-
-          if (prop.type === "title") {
-            for (const t of prop.title || []) {
-              const href = t?.href;
-              if (href) return String(href);
-              const x = tryText(t?.plain_text);
-              if (x) return x;
-            }
-            return null;
-          }
-
-          return extractFirstFileUrl(prop);
-        } catch {
-          return null;
-        }
-      };
-
-      const receivedProp = (await (async () => {
-        const props = await getOrdersDBProps();
-        if (props[REC_PROP_HARDBIND] && props[REC_PROP_HARDBIND].type === "number") return REC_PROP_HARDBIND;
-        return await detectReceivedQtyPropName();
-      })());
-
-      while (hasMore) {
-        const response = await notion.databases.query({
-          database_id: ordersDatabaseId,
-          start_cursor: startCursor,
-          filter: { property: "Teams Members", relation: { contains: userId } },
-          sorts: [{ timestamp: "created_time", direction: "descending" }],
-        });
-
-        for (const page of response.results) {
-                    const productRelation = page.properties.Product?.relation;
-          let productName = "Unknown Product";
-          let unitPrice = null;
-          let productImage = null;
-          let productUrl = null;
-
-          // Helper to safely extract numbers from Notion props (number / formula / rollup / rich_text)
-          const parseNumberProp = (prop) => {
-            if (!prop) return null;
-            try {
-              if (prop.type === "number") return prop.number ?? null;
-
-              if (prop.type === "formula") {
-                if (prop.formula?.type === "number") return prop.formula.number ?? null;
-                if (prop.formula?.type === "string") {
-                  const n = parseFloat(String(prop.formula.string || "").replace(/[^0-9.]/g, ""));
-                  return Number.isFinite(n) ? n : null;
-                }
-              }
-
-              if (prop.type === "rollup") {
-                if (prop.rollup?.type === "number") return prop.rollup.number ?? null;
-
-                if (prop.rollup?.type === "array") {
-                  const arr = prop.rollup.array || [];
-                  for (const x of arr) {
-                    if (x.type === "number" && typeof x.number === "number") return x.number;
-                    if (x.type === "formula" && x.formula?.type === "number") return x.formula.number;
-                    if (x.type === "formula" && x.formula?.type === "string") {
-                      const n = parseFloat(String(x.formula.string || "").replace(/[^0-9.]/g, ""));
-                      if (Number.isFinite(n)) return n;
-                    }
-                    if (x.type === "rich_text") {
-                      const t = (x.rich_text || []).map(r => r.plain_text).join("").trim();
-                      const n = parseFloat(t.replace(/[^0-9.]/g, ""));
-                      if (Number.isFinite(n)) return n;
-                    }
-                  }
-                }
-              }
-
-              if (prop.type === "rich_text") {
-                const t = (prop.rich_text || []).map(r => r.plain_text).join("").trim();
-                const n = parseFloat(t.replace(/[^0-9.]/g, ""));
-                return Number.isFinite(n) ? n : null;
-              }
-            } catch {}
-            return null;
-          };
-
-          if (productRelation && productRelation.length > 0) {
-            try {
-              const productPage = await notion.pages.retrieve({
-                page_id: productRelation[0].id,
-              });
-
-              productName =
-                productPage.properties?.Name?.title?.[0]?.plain_text ||
-                "Unknown Product";
-
-              // Price in Products_Database is a Number named "Unity Price"
-              unitPrice =
-                parseNumberProp(productPage.properties?.["Unity Price"]) ??
-                parseNumberProp(productPage.properties?.["Unit price"]) ??
-                parseNumberProp(productPage.properties?.["Unit Price"]) ??
-                parseNumberProp(productPage.properties?.["Price"]) ??
-                null;
-
-              // Use Notion cover/icon as a lightweight product image if present
-              if (productPage.cover?.type === "external") productImage = productPage.cover.external.url;
-              if (productPage.cover?.type === "file") productImage = productPage.cover.file.url;
-              if (!productImage && productPage.icon?.type === "external") productImage = productPage.icon.external.url;
-              if (!productImage && productPage.icon?.type === "file") productImage = productPage.icon.file.url;
-
-              // Product URL (if exists)
-              const urlProp =
-                getPropInsensitive(productPage.properties, "URL") ||
-                getPropInsensitive(productPage.properties, "Link") ||
-                getPropInsensitive(productPage.properties, "Website") ||
-                getPropInsensitive(productPage.properties, "Product URL") ||
-                getPropInsensitive(productPage.properties, "Product Link");
-              productUrl = extractUrl(urlProp);
-            } catch (e) {
-              console.error(
-                "Could not retrieve related product page:",
-                e.body || e.message,
-              );
-            }
-          }
-
-          const uid = getOrderUniqueIdDetails(page.properties || {});
-
-          // Created by (Teams Members relation)
-          let createdById = "";
-          let createdByName = "";
-          const teamRel = page.properties?.["Teams Members"]?.relation;
-          if (Array.isArray(teamRel) && teamRel.length) {
-            createdById = teamRel[0].id;
-            createdByName = await memberName(createdById);
-          }
-
-          // Status + color (select/status)
-          const statusProp = page.properties?.["Status"];
-          const statusName =
-            statusProp?.select?.name || statusProp?.status?.name || "Pending";
-          const statusColor =
-            statusProp?.select?.color || statusProp?.status?.color || "default";
-
-          const qtyRequested = page.properties?.["Quantity Requested"]?.number || 0;
-          const qtyReceived =
-            receivedProp && page.properties?.[receivedProp]
-              ? page.properties?.[receivedProp]?.number
-              : null;
-          const qtyForUI =
-            qtyReceived !== null && qtyReceived !== undefined && Number.isFinite(Number(qtyReceived))
-              ? Number(qtyReceived)
-              : Number(qtyRequested) || 0;
-
-          allOrders.push({
-            id: page.id,
-            // Human-readable order identifier from Notion "ID" (unique_id)
-            orderId: uid.text,
-            orderIdPrefix: uid.prefix,
-            orderIdNumber: uid.number,
-            reason:
-              page.properties?.Reason?.title?.[0]?.plain_text || "No Reason",
-            productName,
-            productImage,
-            productUrl,
-            unitPrice,
-            quantity: qtyForUI,
-            status: statusName,
-            statusColor,
-            createdById,
-            createdByName,
-            createdTime: page.created_time,
+        while (hasMore) {
+          const response = await notion.databases.query({
+            database_id: ordersDatabaseId,
+            start_cursor: startCursor,
+            page_size: 100,
+            filter: { property: "Teams Members", relation: { contains: userId } },
+            sorts: [{ timestamp: "created_time", direction: "descending" }],
           });
+
+          for (const page of response.results || []) {
+            const props = page.properties || {};
+            const uid = getOrderUniqueIdDetails(props);
+
+            const productPageId = props?.Product?.relation?.[0]?.id || null;
+            if (productPageId) productIds.add(productPageId);
+
+            const createdById = props?.["Teams Members"]?.relation?.[0]?.id || "";
+            if (createdById) memberIds.add(createdById);
+
+            const statusProp = props?.["Status"];
+            const statusName = statusProp?.select?.name || statusProp?.status?.name || "Pending";
+            const statusColor = statusProp?.select?.color || statusProp?.status?.color || "default";
+
+            const qtyRequested = props?.["Quantity Requested"]?.number || 0;
+            const qtyReceived =
+              receivedProp && props?.[receivedProp]
+                ? props?.[receivedProp]?.number
+                : null;
+            const qtyForUI =
+              qtyReceived !== null && qtyReceived !== undefined && Number.isFinite(Number(qtyReceived))
+                ? Number(qtyReceived)
+                : Number(qtyRequested) || 0;
+
+            rows.push({
+              id: page.id,
+              orderId: uid.text,
+              orderIdPrefix: uid.prefix,
+              orderIdNumber: uid.number,
+              reason: props?.Reason?.title?.[0]?.plain_text || "No Reason",
+              productPageId,
+              quantity: qtyForUI,
+              status: statusName,
+              statusColor,
+              createdById,
+              createdTime: page.created_time,
+            });
+          }
+
+          hasMore = response.has_more;
+          startCursor = response.next_cursor;
         }
 
-        hasMore = response.has_more;
-        startCursor = response.next_cursor;
-      }
+        const [productMap, memberMap] = await Promise.all([
+          mapWithConcurrency(productIds, 3, getProductInfoCached),
+          mapWithConcurrency(memberIds, 3, getTeamMemberNameCached),
+        ]);
 
-      const TTL_MS = 10 * 60 * 1000;
-      let recent = Array.isArray(req.session.recentOrders)
-        ? req.session.recentOrders
-        : [];
-      recent = recent.filter(
-        (r) => Date.now() - new Date(r.createdTime).getTime() < TTL_MS,
-      );
+        return rows.map((r) => {
+          const p = r.productPageId ? productMap.get(r.productPageId) : null;
+          return {
+            id: r.id,
+            orderId: r.orderId,
+            orderIdPrefix: r.orderIdPrefix,
+            orderIdNumber: r.orderIdNumber,
+            reason: r.reason,
+            productName: p?.name || "Unknown Product",
+            productImage: p?.image || null,
+            productUrl: p?.url || null,
+            unitPrice: (typeof p?.unitPrice === "number" ? p.unitPrice : null),
+            quantity: r.quantity,
+            status: r.status,
+            statusColor: r.statusColor,
+            createdById: r.createdById,
+            createdByName: r.createdById ? (memberMap.get(r.createdById) || "") : "",
+            createdTime: r.createdTime,
+          };
+        });
+      });
 
       const ids = new Set(allOrders.map((o) => o.id));
       const extras = recent.filter((r) => !ids.has(r.id));
       const merged = allOrders
         .concat(extras)
         .sort((a, b) => new Date(b.createdTime) - new Date(a.createdTime));
-
-      req.session.recentOrders = recent;
 
       res.json(merged);
     } catch (error) {
@@ -1095,15 +3515,9 @@ app.get(
     res.set("Cache-Control", "no-store");
 
     try {
-      // Find current user
-      const userQuery = await notion.databases.query({
-        database_id: teamMembersDatabaseId,
-        filter: { property: "Name", title: { equals: req.session.username } },
-      });
-      if (userQuery.results.length === 0) {
-        return res.status(404).json({ error: "User not found." });
-      }
-      const userId = userQuery.results[0].id;
+      // Find current user (cached in session if available)
+      const userId = await getSessionUserNotionId(req);
+      if (!userId) return res.status(404).json({ error: "User not found." });
 
       // Retrieve a reference order page to extract the Reason/title
       let basePage;
@@ -1198,33 +3612,14 @@ app.get(
       async function getProductInfo(productPageId) {
         if (!productPageId) return { name: "Unknown Product", unitPrice: null, image: null };
         if (productCache.has(productPageId)) return productCache.get(productPageId);
-
-        try {
-          const productPage = await notion.pages.retrieve({ page_id: productPageId });
-          const name =
-            productPage.properties?.Name?.title?.[0]?.plain_text || "Unknown Product";
-
-          const unitPrice =
-            parseNumberProp(productPage.properties?.["Unity Price"]) ??
-            parseNumberProp(productPage.properties?.["Unit price"]) ??
-            parseNumberProp(productPage.properties?.["Unit Price"]) ??
-            parseNumberProp(productPage.properties?.["Price"]) ??
-            null;
-
-          let image = null;
-          if (productPage.cover?.type === "external") image = productPage.cover.external.url;
-          if (productPage.cover?.type === "file") image = productPage.cover.file.url;
-          if (!image && productPage.icon?.type === "external") image = productPage.icon.external.url;
-          if (!image && productPage.icon?.type === "file") image = productPage.icon.file.url;
-
-          const info = { name, unitPrice, image };
-          productCache.set(productPageId, info);
-          return info;
-        } catch (e) {
-          const info = { name: "Unknown Product", unitPrice: null, image: null };
-          productCache.set(productPageId, info);
-          return info;
-        }
+        const info = await getProductInfoCached(productPageId);
+        const out = {
+          name: info?.name || "Unknown Product",
+          unitPrice: typeof info?.unitPrice === "number" ? info.unitPrice : null,
+          image: info?.image || null,
+        };
+        productCache.set(productPageId, out);
+        return out;
       }
 
       while (hasMore) {
@@ -1338,7 +3733,11 @@ app.get(
   async (req, res) => {
     if (!ordersDatabaseId)
       return res.status(500).json({ error: "Orders DB not configured" });
+
+    res.set("Cache-Control", "no-store");
     try {
+      const cacheKey = "cache:api:orders:requested:v2";
+      const data = await cacheGetOrSet(cacheKey, 60, async () => {
       const all = [];
       let hasMore = true,
         startCursor;
@@ -1348,10 +3747,9 @@ app.get(
         if (!id) return "";
         if (nameCache.has(id)) return nameCache.get(id);
         try {
-          const page = await notion.pages.retrieve({ page_id: id });
-          const nm = page.properties?.Name?.title?.[0]?.plain_text || "";
-          nameCache.set(id, nm);
-          return nm;
+          const nm = await getTeamMemberNameCached(id);
+          nameCache.set(id, nm || "");
+          return nm || "";
         } catch {
           return "";
         }
@@ -1511,53 +3909,9 @@ app.get(
           return { name: "Unknown Product", unitPrice: null, image: null, url: null };
         }
         if (productCache.has(productPageId)) return productCache.get(productPageId);
-        try {
-          const productPage = await notion.pages.retrieve({ page_id: productPageId });
-          const name =
-            productPage.properties?.Name?.title?.[0]?.plain_text ||
-            "Unknown Product";
-
-          const unitPrice =
-            parseNumberProp(productPage.properties?.["Unity Price"]) ??
-            parseNumberProp(productPage.properties?.["Unit price"]) ??
-            parseNumberProp(productPage.properties?.["Unit Price"]) ??
-            parseNumberProp(productPage.properties?.["Price"]) ??
-            null;
-
-          let image = null;
-          if (productPage.cover?.type === "external") image = productPage.cover.external.url;
-          if (productPage.cover?.type === "file") image = productPage.cover.file.url;
-          if (!image && productPage.icon?.type === "external") image = productPage.icon.external.url;
-          if (!image && productPage.icon?.type === "file") image = productPage.icon.file.url;
-
-          // Prefer the external product URL property (Products DB column "URL")
-          // Fallback to Notion page URL if the property is missing.
-          let url = null;
-          try {
-            const urlProp =
-              getPropInsensitive(productPage.properties, "URL") ||
-              getPropInsensitive(productPage.properties, "Url") ||
-              getPropInsensitive(productPage.properties, "Link") ||
-              getPropInsensitive(productPage.properties, "Website");
-
-            if (urlProp?.type === "url") url = urlProp.url || null;
-            if (!url && urlProp?.type === "rich_text") {
-              const t = (urlProp.rich_text || [])
-                .map((x) => x?.plain_text || "")
-                .join("")
-                .trim();
-              url = t || null;
-            }
-          } catch {}
-          if (!url) url = productPage.url || null;
-          const info = { name, unitPrice, image, url };
-          productCache.set(productPageId, info);
-          return info;
-        } catch {
-          const info = { name: "Unknown Product", unitPrice: null, image: null, url: null };
-          productCache.set(productPageId, info);
-          return info;
-        }
+        const info = await getProductInfoCached(productPageId);
+        productCache.set(productPageId, info);
+        return info;
       }
 
       const receivedQtyPropName = await detectReceivedQtyPropName();
@@ -1728,7 +4082,10 @@ if (svApproval !== "Approved") continue;
         startCursor = resp.next_cursor;
       }
 
-      res.json(all);
+      return all;
+      });
+
+      return res.json(data);
     } catch (e) {
       console.error(e);
       res.status(500).json({ error: "Failed to fetch requested orders" });
@@ -1776,6 +4133,16 @@ app.post(
             properties: { [assignedProp]: { relation: (memberIds || []).map(id => ({ id })) } },
           }),
         ),
+      );
+
+      // Invalidate caches so lists reflect the assignment immediately.
+      await cacheDel("cache:api:orders:requested:v2");
+      const memberIdsNorm = (memberIds || [])
+        .map((x) => String(x || "").trim())
+        .filter(Boolean)
+        .map((x) => (looksLikeNotionId(x) ? toHyphenatedUUID(x) : x));
+      await Promise.all(
+        memberIdsNorm.map((mid) => cacheDel(`cache:api:orders:assigned:${mid}:v2`)),
       );
 
       res.json({ success: true });
@@ -1993,6 +4360,9 @@ app.post(
         }),
       );
 
+      // Invalidate cached lists (Operations view).
+      await cacheDel("cache:api:orders:requested:v2");
+
       res.json({
         success: true,
         status: shippedName,
@@ -2078,6 +4448,8 @@ app.post(
         ),
       );
 
+      await cacheDel("cache:api:orders:requested:v2");
+
       res.json({ success: true, status: arrivedName, statusColor: arrivedColor });
     } catch (e) {
       console.error("mark-arrived error:", e.body || e);
@@ -2120,6 +4492,19 @@ app.post(
           [receivedProp]: { number: vNum },
         },
       });
+
+      // Invalidate caches so quantities update immediately.
+      await cacheDel("cache:api:orders:requested:v2");
+      try {
+        const page = await notion.pages.retrieve({ page_id: id });
+        const rel = page?.properties?.["Teams Members"]?.relation || [];
+        const memberIds = (Array.isArray(rel) ? rel : [])
+          .map((r) => r?.id)
+          .filter(Boolean);
+        await Promise.all(
+          memberIds.map((mid) => cacheDel(`cache:api:orders:list:${mid}:v2`)),
+        );
+      } catch {}
 
       return res.json({ success: true, value: vNum });
     } catch (e) {
@@ -2268,10 +4653,9 @@ app.post(
         if (!id) return "";
         if (nameCache.has(id)) return nameCache.get(id);
         try {
-          const p = await notion.pages.retrieve({ page_id: id });
-          const nm = p.properties?.Name?.title?.[0]?.plain_text || "";
-          nameCache.set(id, nm);
-          return nm;
+          const nm = await getTeamMemberNameCached(id);
+          nameCache.set(id, nm || "");
+          return nm || "";
         } catch {
           return "";
         }
@@ -2280,41 +4664,17 @@ app.post(
       // Product cache
       const productCache = new Map();
       async function productInfo(productPageId) {
-        if (!productPageId) return { name: "Unknown", unitPrice: null, url: null };
+        if (!productPageId) return { name: "Unknown", idCode: null, unitPrice: null, url: null };
         if (productCache.has(productPageId)) return productCache.get(productPageId);
-        try {
-          const p = await notion.pages.retrieve({ page_id: productPageId });
-          const name = p.properties?.Name?.title?.[0]?.plain_text || "Unknown";
-          const idCode = _extractIdCodeFromProps(p.properties || {});
-          const unitPrice =
-            parseNumberProp(p.properties?.["Unity Price"]) ??
-            parseNumberProp(p.properties?.["Unit price"]) ??
-            parseNumberProp(p.properties?.["Unit Price"]) ??
-            parseNumberProp(p.properties?.["Price"]) ??
-            null;
-          let url = null;
-          try {
-            const urlProp =
-              getPropInsensitive(p.properties, "URL") ||
-              getPropInsensitive(p.properties, "Url") ||
-              getPropInsensitive(p.properties, "Link") ||
-              getPropInsensitive(p.properties, "Website");
-
-            if (urlProp?.type === "url") url = urlProp.url || null;
-            if (!url && urlProp?.type === "rich_text") {
-              const t = (urlProp.rich_text || []).map((x) => x?.plain_text || "").join("").trim();
-              url = t || null;
-            }
-          } catch {}
-          if (!url) url = p.url || null;
-          const info = { name, idCode, unitPrice, url };
-          productCache.set(productPageId, info);
-          return info;
-        } catch {
-          const info = { name: "Unknown", idCode: null, unitPrice: null, url: null };
-          productCache.set(productPageId, info);
-          return info;
-        }
+        const info = await getProductInfoCached(productPageId);
+        const out = {
+          name: info?.name || "Unknown",
+          idCode: info?.idCode || null,
+          unitPrice: typeof info?.unitPrice === "number" ? info.unitPrice : null,
+          url: info?.url || null,
+        };
+        productCache.set(productPageId, out);
+        return out;
       }
 
       // Header info
@@ -2913,81 +5273,81 @@ app.get(
   requireAuth,
   requirePage("Assigned Schools Requested Orders"),
   async (req, res) => {
+    res.set("Cache-Control", "no-store");
     try {
-      const userId = await getCurrentUserPageId(req.session.username);
+      const userId = await getSessionUserNotionId(req);
       if (!userId) return res.status(404).json({ error: "User not found." });
 
-      const assignedProp = await detectAssignedPropName();
-      const availableProp = await detectAvailableQtyPropName(); // قد يكون null
-      const statusProp   = await detectStatusPropName();        // غالبًا "Status"
-      // Received Quantity property (Number)
-      const receivedProp = (await (async()=>{
-        const props = await getOrdersDBProps();
-        if (props[REC_PROP_HARDBIND] && props[REC_PROP_HARDBIND].type === "number") return REC_PROP_HARDBIND;
-        return await detectReceivedQtyPropName();
-      })());
+      // Small TTL cache: this endpoint is hit often (reloads + polling)
+      const cacheKey = `cache:api:orders:assigned:${userId}:v2`;
+      const items = await cacheGetOrSet(cacheKey, 60, async () => {
+        const assignedProp = await detectAssignedPropName();
+        const availableProp = await detectAvailableQtyPropName(); // may be null
+        const statusProp = await detectStatusPropName(); // usually "Status"
+        const receivedProp = await (async () => {
+          const props = await getOrdersDBProps();
+          if (props[REC_PROP_HARDBIND] && props[REC_PROP_HARDBIND].type === "number") return REC_PROP_HARDBIND;
+          return await detectReceivedQtyPropName();
+        })();
 
-      const items = [];
-      let hasMore = true;
-      let startCursor = undefined;
+        const raw = [];
+        const productIds = new Set();
+        let hasMore = true;
+        let startCursor = undefined;
 
-      while (hasMore) {
-        const resp = await notion.databases.query({
-          database_id: ordersDatabaseId,
-          start_cursor: startCursor,
-          filter: { property: assignedProp, relation: { contains: userId } },
-          sorts: [{ timestamp: "created_time", direction: "descending" }],
-        });
+        while (hasMore) {
+          const resp = await notion.databases.query({
+            database_id: ordersDatabaseId,
+            start_cursor: startCursor,
+            filter: { property: assignedProp, relation: { contains: userId } },
+            sorts: [{ timestamp: "created_time", direction: "descending" }],
+            page_size: 100,
+          });
 
-        for (const page of resp.results) {
-          const props = page.properties || {};
+          for (const page of resp.results || []) {
+            const props = page.properties || {};
+            const productPageId = props.Product?.relation?.[0]?.id || null;
+            if (productPageId) productIds.add(productPageId);
 
-          // Product name
-          let productName = "Unknown Product";
-          const productRel = props.Product?.relation;
-          if (Array.isArray(productRel) && productRel.length) {
-            try {
-              const productPage = await notion.pages.retrieve({
-                page_id: productRel[0].id,
-              });
-              productName =
-                productPage.properties?.Name?.title?.[0]?.plain_text ||
-                productName;
-            } catch {}
+            raw.push({
+              id: page.id,
+              productPageId,
+              requested: Number(props["Quantity Requested"]?.number || 0),
+              available: availableProp ? Number(props[availableProp]?.number || 0) : 0,
+              reason: props.Reason?.title?.[0]?.plain_text || "No Reason",
+              status: statusProp ? (props[statusProp]?.select?.name || props[statusProp]?.status?.name || "") : "",
+              rec: receivedProp ? Number(props[receivedProp]?.number || 0) : 0,
+              createdTime: page.created_time,
+            });
           }
 
-          const requested = Number(props["Quantity Requested"]?.number || 0);
-          const available = availableProp
-            ? Number(props[availableProp]?.number || 0)
-            : 0;
-          const remaining = Math.max(0, requested - available);
-          const reason = props.Reason?.title?.[0]?.plain_text || "No Reason";
-          const status = statusProp ? (props[statusProp]?.select?.name || "") : "";
-          const recVal = receivedProp ? Number(props[receivedProp]?.number || 0) : 0;
-
-          items.push({
-            id: page.id,
-            productName,
-            requested,
-            available,
-            remaining,
-            quantityReceivedByOperations: recVal,
-            rec: recVal,
-            createdTime: page.created_time,
-            reason,
-            status,
-          });
+          hasMore = resp.has_more;
+          startCursor = resp.next_cursor;
         }
 
-        hasMore = resp.has_more;
-        startCursor = resp.next_cursor;
-      }
+        const productMap = await mapWithConcurrency(productIds, 3, getProductInfoCached);
+        return raw.map((r) => {
+          const productName = r.productPageId ? (productMap.get(r.productPageId)?.name || "Unknown Product") : "Unknown Product";
+          const remaining = Math.max(0, Number(r.requested) - Number(r.available));
+          return {
+            id: r.id,
+            productName,
+            requested: r.requested,
+            available: r.available,
+            remaining,
+            quantityReceivedByOperations: r.rec,
+            rec: r.rec,
+            createdTime: r.createdTime,
+            reason: r.reason,
+            status: r.status,
+          };
+        });
+      });
 
-      res.set("Cache-Control", "no-store");
-      res.json(items);
+      return res.json(items);
     } catch (e) {
       console.error(e);
-      res.status(500).json({ error: "Failed to fetch assigned orders" });
+      return res.status(500).json({ error: "Failed to fetch assigned orders" });
     }
   },
 );
@@ -3026,6 +5386,12 @@ app.post(
         page_id: orderPageId,
         properties: updates,
       });
+
+      // Invalidate the assigned list cache for the current user.
+      const userId = await getSessionUserNotionId(req);
+      if (userId) {
+        await cacheDel(`cache:api:orders:assigned:${userId}:v2`);
+      }
 
       res.json({
         success: true,
@@ -3079,6 +5445,11 @@ app.post(
         properties: updates,
       });
 
+      const userId = await getSessionUserNotionId(req);
+      if (userId) {
+        await cacheDel(`cache:api:orders:assigned:${userId}:v2`);
+      }
+
       res.json({ success: true, available: newAvailable, remaining });
     } catch (e) {
       console.error(e.body || e);
@@ -3111,6 +5482,11 @@ app.post(
           }),
         ),
       );
+
+      const userId = await getSessionUserNotionId(req);
+      if (userId) {
+        await cacheDel(`cache:api:orders:assigned:${userId}:v2`);
+      }
 
       res.json({ success: true, updated: orderIds.length });
     } catch (e) {
@@ -4093,6 +6469,12 @@ if (cleanedProducts.some(p => !p.reason)) {
 
       delete req.session.orderDraft;
 
+      // Invalidate cached Current Orders list for this user.
+      const currentUserId = await getSessionUserNotionId(req);
+      if (currentUserId) {
+        await cacheDel(`cache:api:orders:list:${currentUserId}:v2`);
+      }
+
       res.json({
         success: true,
         message: "Order submitted and saved to Notion successfully!",
@@ -4127,6 +6509,12 @@ app.post(
         page_id: orderPageId,
         properties: { "Status": { select: { name: "Received" } } },
       });
+
+      // Invalidate cached Current Orders list for this user (so UI updates instantly).
+      const userId = await getSessionUserNotionId(req);
+      if (userId) {
+        await cacheDel(`cache:api:orders:list:${userId}:v2`);
+      }
       res.json({ success: true });
     } catch (error) {
       console.error(
@@ -4556,17 +6944,20 @@ app.get(
 );
 
 // ===== Stocktaking PDF download — requires Stocktaking =====
-// Supports BOTH GET (empty inventory) and POST (inventory values from UI)
+// Inventory column has been removed from Stocktaking (UI/PDF/Excel)
+// PDF template matches B2B-school stocktaking PDF template.
+// Supports BOTH GET and POST (POST body is ignored for backward compatibility)
 app.all(
   "/api/stock/pdf",
   requireAuth,
   requirePage("Stocktaking"),
   async (req, res) => {
-    try {
-      const inventoryMapRaw = req?.body?.inventory;
-      const inventoryMap =
-        inventoryMapRaw && typeof inventoryMapRaw === "object" ? inventoryMapRaw : {};
+    if (!teamMembersDatabaseId || !stocktakingDatabaseId) {
+      return res.status(500).json({ error: "Database IDs are not configured." });
+    }
 
+    try {
+      // Resolve the current user's school (same logic as /api/stock)
       const userResponse = await notion.databases.query({
         database_id: teamMembersDatabaseId,
         filter: { property: "Name", title: { equals: req.session.username } },
@@ -4589,12 +6980,12 @@ app.all(
           .json({ error: "Could not determine school name for the user." });
 
       const productsNameToIdCode = await _getProductsNameToIdCodeMap();
-
       const lookupIdCode = (componentName, fallbackProps) => {
         const fromProducts = productsNameToIdCode.get(_normNameKey(componentName));
         return fromProducts || _extractIdCodeFromProps(fallbackProps || {}) || "";
       };
 
+      // Fetch stock rows (same as /api/stock)
       const allStock = [];
       let hasMore = true;
       let startCursor = undefined;
@@ -4621,7 +7012,7 @@ app.all(
           sorts: [{ property: "Name", direction: "ascending" }],
         });
 
-        const stockFromPage = stockResponse.results
+        const stockFromPage = (stockResponse.results || [])
           .map((page) => {
             const props = page.properties || {};
             const componentName =
@@ -4630,15 +7021,7 @@ app.all(
               "Untitled";
 
             const quantity = firstDefinedNumber(props[schoolName]);
-
             const idCode = lookupIdCode(componentName, props);
-
-            // Inventory values come from the UI (POST body). If the key exists, allow 0.
-            let inventory = null;
-            if (inventoryMap && Object.prototype.hasOwnProperty.call(inventoryMap, page.id)) {
-              const n = Number(inventoryMap[page.id]);
-              if (Number.isFinite(n) && n >= 0) inventory = n;
-            }
 
             let tag = null;
             if (props.Tag?.select) {
@@ -4663,9 +7046,8 @@ app.all(
             return {
               id: page.id,
               name: componentName,
-              quantity: Number(quantity) || 0,
               idCode,
-              inventory,
+              quantity: Number(quantity) || 0,
               tag,
             };
           })
@@ -4679,494 +7061,335 @@ app.all(
       // Filter: include only items that have a positive In Stock value
       const filteredStockForPdf = (allStock || []).filter((it) => Number(it.quantity) > 0);
 
-      // ===== Grouping =====
-      const groupsMap = new Map();
-      (filteredStockForPdf || []).forEach((it) => {
-        const name = it?.tag?.name || "Untagged";
-        const color = it?.tag?.color || "default";
-        const key = `${String(name).toLowerCase()}|${color}`;
-        if (!groupsMap.has(key)) groupsMap.set(key, { name, color, items: [] });
-        groupsMap.get(key).items.push(it);
-      });
-      let groups = Array.from(groupsMap.values()).sort((a, b) =>
-        String(a.name).localeCompare(String(b.name)),
-      );
-      const untagged = groups.filter(
-        (g) => String(g.name).toLowerCase() === "untagged" || g.name === "-",
-      );
-      groups = groups
-        .filter(
-          (g) =>
-            !(String(g.name).toLowerCase() === "untagged" || g.name === "-"),
-        )
-        .concat(untagged);
+      // PDF should be Done-only (no Inventory/Defected) for Stocktaking.
+      const includeInventoryCol = false;
+      const includeDefectedCol = false;
+      const includeSignatureBlocks = false;
 
-      // ===== PDF =====
-      const fname = `Stocktaking-${new Date().toISOString().slice(0, 10)}.pdf`;
+      const createdAt = new Date();
+      const dateStr = createdAt.toISOString().slice(0, 10);
+      const fileName = `Stocktaking-${dateStr}.pdf`;
       res.setHeader("Content-Type", "application/pdf");
-      res.setHeader("Content-Disposition", `attachment; filename="${fname}"`);
+      res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+      res.set("Cache-Control", "no-store");
 
       const doc = new PDFDocument({ size: "A4", margin: 36 });
       doc.pipe(res);
 
+      const logoPath = path.join(__dirname, "../public/images/logo.png");
       const COLORS = {
-        border: "#E5E7EB",
-        muted: "#6B7280",
         text: "#111827",
-        danger: "#DC2626",
-        headerBg: "#F3F4F6",
+        muted: "#6B7280",
+        border: "#E5E7EB",
+        headerBg: "#F9FAFB",
+        tableHeadBg: "#ECFDF5",
+        tagPillBg: "#D1FAE5",
+        accent: "#065F46",
+        mismatch: "#DC2626",
+        mismatchBg: "#FEF2F2",
       };
 
-      const palette = {
-        default: { fill: "#F3F4F6", border: "#E5E7EB", text: "#111827" },
-        gray: { fill: "#F3F4F6", border: "#E5E7EB", text: "#374151" },
-        brown: { fill: "#EFEBE9", border: "#D7CCC8", text: "#4E342E" },
-        orange: { fill: "#FFF7ED", border: "#FED7AA", text: "#9A3412" },
-        yellow: { fill: "#FEFCE8", border: "#FDE68A", text: "#854D0E" },
-        green: { fill: "#ECFDF5", border: "#A7F3D0", text: "#065F46" },
-        blue: { fill: "#EFF6FF", border: "#BFDBFE", text: "#1E40AF" },
-        purple: { fill: "#F5F3FF", border: "#DDD6FE", text: "#5B21B6" },
-        pink: { fill: "#FDF2F8", border: "#FBCFE8", text: "#9D174D" },
-        red: { fill: "#FEF2F2", border: "#FECACA", text: "#991B1B" },
+      const normalizeTagName = (name) => {
+        const n = String(name || "").trim();
+        if (!n) return "Untagged";
+        if (n.toLowerCase() === "untagged" || n === "-") return "Untagged";
+        return n;
       };
-      const getPal = (c = "default") => palette[c] || palette.default;
 
-      const createdAt = new Date();
-      const teamMember = String(req.session.username || "—");
-      const preparedBy = teamMember;
-
-      function formatDateTime(date) {
-        try {
-          const d = date instanceof Date ? date : new Date(date);
-          if (Number.isNaN(d.getTime())) return String(date || "-");
-          return d.toLocaleString("en-GB", {
-            day: "2-digit",
-            month: "short",
-            year: "numeric",
-            hour: "2-digit",
-            minute: "2-digit",
-          });
-        } catch {
-          return String(date || "-");
+      const notionToHex = (color = "default") => {
+        switch (color) {
+          case "gray":
+            return { bg: "#F3F4F6", text: "#374151" };
+          case "brown":
+            return { bg: "#EFEBE9", text: "#4E342E" };
+          case "orange":
+            return { bg: "#FFF7ED", text: "#9A3412" };
+          case "yellow":
+            return { bg: "#FEFCE8", text: "#854D0E" };
+          case "green":
+            return { bg: "#ECFDF5", text: "#065F46" };
+          case "blue":
+            return { bg: "#EFF6FF", text: "#1E40AF" };
+          case "purple":
+            return { bg: "#F5F3FF", text: "#5B21B6" };
+          case "pink":
+            return { bg: "#FDF2F8", text: "#9D174D" };
+          case "red":
+            return { bg: "#FEF2F2", text: "#991B1B" };
+          default:
+            return { bg: "#F3F4F6", text: "#374151" };
         }
+      };
+
+      // Group items by tag
+      const groupMap = new Map();
+      for (const it of filteredStockForPdf) {
+        const tagName = normalizeTagName(it?.tag?.name);
+        const tagColor = it?.tag?.color || "default";
+        const key = `${tagName.toLowerCase()}|${tagColor}`;
+        if (!groupMap.has(key)) groupMap.set(key, { name: tagName, color: tagColor, items: [] });
+        groupMap.get(key).items.push(it);
       }
+      let groups = Array.from(groupMap.values()).sort((a, b) => a.name.localeCompare(b.name));
+      const untagged = groups.filter((g) => g.name === "Untagged");
+      groups = groups.filter((g) => g.name !== "Untagged").concat(untagged);
 
-      const logoPath = path.join(
-        __dirname,
-        "..",
-        "public",
-        "images",
-        "Logo horizontal.png",
-      );
+      // Layout
+      const pageW = doc.page.width;
+      const mL = doc.page.margins.left;
+      const mR = doc.page.margins.right;
+      const mB = doc.page.margins.bottom;
+      const contentW = pageW - mL - mR;
 
-      // ===== Signature footer sizing (draw on every page) =====
-      const sigTitleH = 22;
-      const sigBoxesH = 120;
-      const sigBlockH = sigTitleH + 14 + 6 + sigBoxesH + 10;
+      const colIdW = 70;
+      const colQtyW = 60;
+      const colInvW = includeInventoryCol ? 70 : 0;
+      const colDefW = includeDefectedCol ? 70 : 0;
+      const colCompW = contentW - colIdW - colQtyW - colInvW - colDefW;
 
-      const drawPageHeader = ({ compact = false } = {}) => {
-        const pageW = doc.page.width;
-        const mL = doc.page.margins.left;
-        const mR = doc.page.margins.right;
-        const mT = doc.page.margins.top;
-        const contentW = pageW - mL - mR;
+      // Page tracking for footer signatures
+      let pageNum = 1;
 
-        const headerTop = mT;
-        const headerH = compact ? 42 : 56;
+      const sigBoxH = 54;
+      const sigFooterReserve = includeSignatureBlocks ? sigBoxH + 20 : 0;
 
-        // Logo (top-right)
-        try {
-          const logoW = compact ? 140 : 170;
-          const logoX = pageW - mR - logoW;
-          const logoY = headerTop - 4;
-          doc.image(logoPath, logoX, logoY, { width: logoW });
-        } catch {
-          // ignore
+      const bottomLimit = () => doc.page.height - mB - (pageNum === 1 ? 0 : sigFooterReserve);
+      const ensureSpace = (needed) => {
+        if (doc.y + needed > bottomLimit()) doc.addPage();
+      };
+
+      // Header
+      try {
+        if (fs.existsSync(logoPath)) {
+          doc.image(logoPath, mL, doc.y, { width: 42 });
         }
+      } catch {}
 
-        // Title (left)
-        const titleX = mL;
-        const titleY = headerTop + (compact ? 2 : 6);
-        const titleW = contentW - (compact ? 150 : 180);
+      const headerX = mL + 52;
+      const headerTopY = doc.y;
 
-        doc
-          .fillColor(COLORS.text)
-          .font("Helvetica-Bold")
-          .fontSize(compact ? 16 : 20)
-          .text("Stocktaking", titleX, titleY, {
-            width: Math.max(120, titleW),
-            align: "left",
-          });
-
-        doc
-          .fillColor(COLORS.muted)
-          .font("Helvetica")
-          .fontSize(10)
-          .text(
-            compact
-              ? `School: ${schoolName || "-"}`
-              : `School: ${schoolName || "-"}   •   Generated: ${formatDateTime(createdAt)}`,
-            titleX,
-            titleY + (compact ? 18 : 24),
-            {
-              width: Math.max(120, titleW),
-              align: "left",
-            },
-          );
-
-        // Divider
-        const lineY = headerTop + headerH;
-        doc
-          .moveTo(mL, lineY)
-          .lineTo(pageW - mR, lineY)
-          .lineWidth(1)
-          .strokeColor(COLORS.border)
-          .stroke();
-
-        doc.y = lineY + 14;
-      };
-
-      const drawSignatureFooter = () => {
-        const prevY = doc.y;
-
-        const pageW = doc.page.width;
-        const pageH = doc.page.height;
-        const mL = doc.page.margins.left;
-        const mR = doc.page.margins.right;
-        const mB = doc.page.margins.bottom;
-        const contentW = pageW - mL - mR;
-
-        const bottomY = pageH - mB;
-        const startY = bottomY - sigBlockH;
-
-        const gap = 16;
-        const boxW = (contentW - gap) / 2;
-        const boxH = sigBoxesH;
-        const boxY = startY + 14 + 6;
-        const leftX = mL;
-        const rightX = mL + boxW + gap;
-
-        const drawSignatureBox = (title, x, y) => {
-          doc.roundedRect(x, y, boxW, boxH, 10).lineWidth(1).strokeColor(COLORS.border).stroke();
-          doc.fillColor(COLORS.text).font("Helvetica-Bold").fontSize(10);
-          doc.text(title, x + 12, y + 10, { width: boxW - 24, align: "left" });
-
-          const lineStartX = x + 12;
-          const lineEndX = x + boxW - 12;
-
-          doc.fillColor(COLORS.muted).font("Helvetica").fontSize(9);
-
-          doc.text("Name", lineStartX, y + 34);
-          doc
-            .moveTo(lineStartX + 40, y + 45)
-            .lineTo(lineEndX, y + 45)
-            .lineWidth(1)
-            .strokeColor(COLORS.border)
-            .stroke();
-
-          doc.text("Signature", lineStartX, y + 58);
-          doc
-            .moveTo(lineStartX + 55, y + 69)
-            .lineTo(lineEndX, y + 69)
-            .lineWidth(1)
-            .strokeColor(COLORS.border)
-            .stroke();
-
-          doc.text("Date", lineStartX, y + 82);
-          doc
-            .moveTo(lineStartX + 30, y + 93)
-            .lineTo(lineStartX + 95, y + 93)
-            .lineWidth(1)
-            .strokeColor(COLORS.border)
-            .stroke();
-          doc.fillColor(COLORS.muted).font("Helvetica").fontSize(9).text("/", lineStartX + 102, y + 84);
-          doc
-            .moveTo(lineStartX + 110, y + 93)
-            .lineTo(lineStartX + 175, y + 93)
-            .lineWidth(1)
-            .strokeColor(COLORS.border)
-            .stroke();
-          doc.fillColor(COLORS.muted).font("Helvetica").fontSize(9).text("/", lineStartX + 182, y + 84);
-          doc
-            .moveTo(lineStartX + 190, y + 93)
-            .lineTo(lineEndX, y + 93)
-            .lineWidth(1)
-            .strokeColor(COLORS.border)
-            .stroke();
-        };
-
-        doc.save();
-        doc.fillColor(COLORS.text).font("Helvetica-Bold").fontSize(12);
-        doc.text("Handover confirmation", mL, startY, { width: contentW, align: "left" });
-
-        drawSignatureBox("Delivered to", leftX, boxY);
-        drawSignatureBox("Received from", rightX, boxY);
-
-        doc.restore();
-        doc.y = prevY;
-      };
-
-      const contentBottomY = () =>
-        doc.page.height - doc.page.margins.bottom - sigBlockH;
-
-      const ensureSpace = (needH, onNewPage) => {
-        const bottom = contentBottomY();
-        if (doc.y + needH > bottom) {
-          doc.addPage();
-          drawPageHeader({ compact: true });
-          drawSignatureFooter();
-          onNewPage?.();
-        }
-      };
-
-      // ===== Page 1 header + footer =====
-      drawPageHeader({ compact: false });
-      drawSignatureFooter();
-
-      // ===== Meta small table (page 1) =====
-      const pageW1 = doc.page.width;
-      const mL1 = doc.page.margins.left;
-      const mR1 = doc.page.margins.right;
-      const contentW1 = pageW1 - mL1 - mR1;
-
-      const metaX = mL1;
-      const metaY = doc.y;
-      const metaW = contentW1;
-      const metaRowH = 30;
-      const metaH = metaRowH; // one-row header table
-      const metaColW = metaW / 2;
-
-      // If the footer is very close (rare), start a new page.
-      ensureSpace(metaH + 20, () => {
-        // Page 2+ doesn't have the meta table; if we ever hit this, just continue.
-      });
+      doc.fillColor(COLORS.text).font("Helvetica-Bold").fontSize(18).text("Stocktaking", headerX, headerTopY);
 
       doc
-        .roundedRect(metaX, metaY, metaW, metaH, 8)
+        .fillColor(COLORS.muted)
+        .font("Helvetica")
+        .fontSize(10)
+        .text(`School: ${schoolName}  •  Generated: ${formatDateTime(createdAt)}`, headerX, headerTopY + 22);
+
+      doc.moveDown(1.2);
+      doc
+        .moveTo(mL, doc.y)
+        .lineTo(pageW - mR, doc.y)
         .lineWidth(1)
         .strokeColor(COLORS.border)
         .stroke();
+      doc.moveDown(0.8);
+
+      // Handover confirmation title
+      doc.fillColor(COLORS.text).font("Helvetica-Bold").fontSize(14).text("Handover Confirmation", mL, doc.y);
 
       doc
-        .moveTo(metaX + metaColW, metaY)
-        .lineTo(metaX + metaColW, metaY + metaH)
-        .strokeColor(COLORS.border)
-        .stroke();
-
-      const drawMetaCell = (label, value, x, y, w) => {
-        const padX = 10;
-        doc
-          .fillColor(COLORS.muted)
-          .font("Helvetica")
-          .fontSize(9)
-          .text(label, x + padX, y + 6, { width: w - padX * 2, align: "left" });
-        doc
-          .fillColor(COLORS.text)
-          .font("Helvetica-Bold")
-          .fontSize(11)
-          .text(value || "—", x + padX, y + 16, { width: w - padX * 2, align: "left" });
-      };
-
-      drawMetaCell("School", String(schoolName || "—"), metaX, metaY, metaColW);
-      drawMetaCell("Date", formatDateTime(createdAt), metaX + metaColW, metaY, metaColW);
-      doc.y = metaY + metaH + 18;
-
-      // ===== Grouped table layout =====
-      const pageInnerWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
-      const gap = 10;
-      const colCodeW = 90;
-      const colInStockW = 80;
-      const colInvW = 90;
-      const colNameW = pageInnerWidth - colCodeW - colInStockW - colInvW - gap * 3;
-
-      const drawGroupHeader = (gName, pal, count, cont = false) => {
-        const y = doc.y + 2;
-        const h = 22;
-        doc.save();
-        doc
-          .roundedRect(doc.page.margins.left, y, pageInnerWidth, h, 6)
-          .fillColor(pal.fill)
-          .strokeColor(pal.border)
-          .lineWidth(1)
-          .fillAndStroke();
-        doc
-          .fillColor(COLORS.muted)
-          .font("Helvetica-Bold")
-          .fontSize(10)
-          .text("Tag", doc.page.margins.left + 10, y + 6);
-        const pillText = cont ? `${gName} (cont.)` : gName;
-        const pillPadX = 10,
-          pillH = 16;
-        const pillW = Math.max(
-          40,
-          doc.widthOfString(pillText, { font: "Helvetica-Bold", size: 10 }) +
-            pillPadX * 2,
+        .fillColor(COLORS.muted)
+        .font("Helvetica")
+        .fontSize(9)
+        .text(
+          "I hereby confirm receiving the below items in good condition. Any discrepancies were noted at delivery.",
+          mL,
+          doc.y + 4,
+          { width: contentW },
         );
-        const pillX = doc.page.margins.left + 38;
-        const pillY = y + (h - pillH) / 2;
-        doc
-          .roundedRect(pillX, pillY, pillW, pillH, 8)
-          .fillColor(pal.fill)
-          .strokeColor(pal.border)
-          .lineWidth(1)
-          .fillAndStroke();
-        doc
-          .fillColor(pal.text)
-          .font("Helvetica-Bold")
-          .fontSize(10)
-          .text(pillText, pillX + pillPadX, pillY + 3);
-        const countTxt = `${count} items`;
-        doc
-          .fillColor(COLORS.text)
-          .font("Helvetica-Bold")
-          .text(countTxt, doc.page.margins.left, y + 5, {
-            width: pageInnerWidth - 10,
-            align: "right",
-          });
-        doc.restore();
-        doc.moveDown(1.4);
-      };
 
-      const drawTableHead = (pal) => {
-        const y = doc.y;
-        const h = 20;
-        doc.save();
-        doc
-          .roundedRect(doc.page.margins.left, y, pageInnerWidth, h, 6)
-          .fillColor(pal.fill)
-          .strokeColor(pal.border)
-          .lineWidth(1)
-          .fillAndStroke();
-        doc.fillColor(pal.text).font("Helvetica-Bold").fontSize(10);
+      doc.moveDown(1.1);
 
-        const baseX = doc.page.margins.left + 10;
-        doc.text("ID Code", baseX, y + 5, { width: colCodeW });
-
-        const compX = baseX + colCodeW + gap;
-        doc.text("Component", compX, y + 5, { width: colNameW });
-
-        const midX = compX + colNameW + gap;
-        doc.text("In Stock", midX, y + 5, {
-          width: colInStockW - 10,
-          align: "right",
-        });
-
-        const lastX = midX + colInStockW + gap;
-        doc.text("Inventory", lastX, y + 5, {
-          width: colInvW - 10,
-          align: "right",
-        });
-
-        doc.restore();
-        doc.moveDown(1.2);
-      };
-
-      const drawRow = (item, pal, onNewPage) => {
-        const codeText = item?.idCode ? String(item.idCode) : "-";
-        const codeHeight = doc.heightOfString(codeText, { width: colCodeW });
-        const nameHeight = doc.heightOfString(item.name || "-", {
-          width: colNameW,
-        });
-        const rowH = Math.max(18, codeHeight, nameHeight);
-
-        // Make sure the whole row fits above the signature footer
-        ensureSpace(rowH + 8, onNewPage);
-
-        const y = doc.y;
-
-        doc.font("Helvetica").fontSize(11).fillColor(COLORS.text);
-        const baseX = doc.page.margins.left + 10;
-        doc.text(codeText, baseX, y, { width: colCodeW });
-
-        const compX = baseX + colCodeW + gap;
-        doc.text(item.name || "-", compX, y, { width: colNameW });
-
-        const midX = compX + colNameW + gap;
+      // Meta info boxes
+      const boxH = 32;
+      const boxGap = 12;
+      const boxW = (contentW - boxGap) / 2;
+      const boxY = doc.y;
+      const drawInfoBox = (x, title, value) => {
+        doc.roundedRect(x, boxY, boxW, boxH, 8).fillColor(COLORS.headerBg).fill();
+        doc.roundedRect(x, boxY, boxW, boxH, 8).strokeColor(COLORS.border).stroke();
+        doc.fillColor(COLORS.muted).font("Helvetica-Bold").fontSize(9).text(title, x + 10, boxY + 6);
         doc
           .fillColor(COLORS.text)
           .font("Helvetica")
-          .fontSize(11)
-          .text(String(Number(item.quantity ?? 0)), midX, y, {
-            width: colInStockW - 10,
-            align: "right",
-          });
+          .fontSize(10)
+          .text(String(value || "-"), x + 10, boxY + 18, { width: boxW - 20 });
+      };
+      drawInfoBox(mL, "School", schoolName);
+      drawInfoBox(mL + boxW + boxGap, "Date", formatDateTime(createdAt));
+      doc.y = boxY + boxH + 16;
 
-        const lastX = midX + colInStockW + gap;
+      // Signature blocks (disabled for Stocktaking exports)
+      const drawSigBox = (x, y, title, linesCount = 1) => {
+        doc.roundedRect(x, y, boxW, sigBoxH, 8).strokeColor(COLORS.border).stroke();
+        doc.fillColor(COLORS.muted).font("Helvetica-Bold").fontSize(9).text(title, x + 10, y + 8);
 
-        // Inventory: if there is a value from the UI, print it; otherwise draw an underline.
-        const invHasValue = item.inventory !== null && typeof item.inventory !== "undefined";
-        if (invHasValue) {
-          const invNum = Number(item.inventory);
-          const stockNum = Number(item.quantity ?? 0);
-          const mismatch = Number.isFinite(invNum) && Number.isFinite(stockNum) && invNum !== stockNum;
-
+        const firstLineY = y + 30;
+        const gap = 12;
+        for (let i = 0; i < Math.max(1, Number(linesCount) || 1); i++) {
+          const lineY = firstLineY + i * gap;
           doc
-            .fillColor(mismatch ? COLORS.danger : COLORS.text)
-            .font("Helvetica")
-            .fontSize(11)
-            .text(String(Number(item.inventory)), lastX, y, {
-              width: colInvW - 10,
-              align: "right",
-            });
-        } else {
-          const lineY = y + rowH - 2;
-          doc
-            .moveTo(lastX + 12, lineY)
-            .lineTo(lastX + colInvW - 18, lineY)
-            .strokeColor(COLORS.border)
+            .moveTo(x + 10, lineY)
+            .lineTo(x + boxW - 10, lineY)
             .lineWidth(1)
+            .strokeColor(COLORS.border)
             .stroke();
         }
-
-        // Row separator
-        doc
-          .moveTo(doc.page.margins.left, y + rowH + 4)
-          .lineTo(doc.page.margins.left + pageInnerWidth, y + rowH + 4)
-          .strokeColor("#F3F4F6")
-          .lineWidth(1)
-          .stroke();
-
-        doc.y = y + rowH + 6;
       };
 
-      const ensureGroupStartSpace = () => ensureSpace(22 + 20 + 18);
+      const drawSignaturesAt = (y) => {
+        drawSigBox(mL, y, "Inventory Team Names / Signatures", 2);
+        drawSigBox(mL + boxW + boxGap, y, "Stockholder Name / Signature", 2);
+      };
 
-      for (const g of groups) {
-        const pal = getPal(g.color);
+      if (includeSignatureBlocks) {
+        const sigY = doc.y;
+        drawSignaturesAt(sigY);
+        doc.y = sigY + sigBoxH + 18;
+      } else {
+        doc.moveDown(0.5);
+      }
 
-        ensureGroupStartSpace();
-        drawGroupHeader(g.name, pal, g.items.length, false);
-        drawTableHead(pal);
-
-        g.items.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
-        for (const item of g.items) {
-          drawRow(item, pal, () => {
-            drawGroupHeader(g.name, pal, g.items.length, true);
-            drawTableHead(pal);
-          });
+      doc.on("pageAdded", () => {
+        pageNum += 1;
+        if (includeSignatureBlocks && pageNum >= 2) {
+          const prevX = doc.x;
+          const prevY = doc.y;
+          const footerY = doc.page.height - mB - sigBoxH;
+          drawSignaturesAt(footerY);
+          doc.x = prevX;
+          doc.y = prevY;
         }
+      });
+
+      if (!groups.length) {
+        doc.fillColor(COLORS.muted).font("Helvetica").fontSize(11).text("No stock data found.", mL, doc.y);
+        doc.end();
+        return;
+      }
+
+      const drawGroupHeader = (tagName, tagColor, count) => {
+        const y = doc.y;
+        const pill = notionToHex(tagColor);
+        const pillText = `Tag   ${tagName}`;
+
+        doc.roundedRect(mL, y, contentW, 28, 10).fillColor(pill.bg).fill();
+
+        doc
+          .roundedRect(mL + 10, y + 6, Math.min(280, doc.widthOfString(pillText) + 18), 16, 8)
+          .fillColor(pill.bg)
+          .fill();
+        doc.fillColor(pill.text).font("Helvetica-Bold").fontSize(9).text(pillText, mL + 18, y + 9);
+
+        const countText = `${count} items`;
+        const countW = doc.widthOfString(countText) + 18;
+        doc.roundedRect(mL + contentW - countW - 10, y + 6, countW, 16, 8).fillColor(pill.bg).fill();
+        doc
+          .roundedRect(mL + contentW - countW - 10, y + 6, countW, 16, 8)
+          .strokeColor(COLORS.border)
+          .stroke();
+        doc
+          .fillColor(COLORS.text)
+          .font("Helvetica-Bold")
+          .fontSize(9)
+          .text(countText, mL + contentW - countW - 10 + 9, y + 9);
+
+        doc.y = y + 34;
+        return pill;
+      };
+
+      const drawTableHeader = (pill) => {
+        const y = doc.y;
+        const bg = pill?.bg || COLORS.tableHeadBg;
+        const txt = pill?.text || COLORS.accent;
+
+        doc.rect(mL, y, contentW, 20).fillColor(bg).fill();
+
+        doc.fillColor(txt).font("Helvetica-Bold").fontSize(9).text("ID Code", mL + 8, y + 6, { width: colIdW - 10 });
+        doc
+          .fillColor(txt)
+          .font("Helvetica-Bold")
+          .fontSize(9)
+          .text("Component", mL + colIdW, y + 6, { width: colCompW - 10 });
+        doc
+          .fillColor(txt)
+          .font("Helvetica-Bold")
+          .fontSize(9)
+          .text("In Stock", mL + colIdW + colCompW, y + 6, { width: colQtyW - 10, align: "right" });
+
+        doc.y = y + 24;
+      };
+
+      const drawRow = (item) => {
+        const y = doc.y;
+        const rowH = 20;
+
+        doc
+          .fillColor(COLORS.text)
+          .font("Helvetica")
+          .fontSize(9)
+          .text(String(item.idCode || ""), mL + 8, y + 6, { width: colIdW - 10 });
+        doc
+          .fillColor(COLORS.text)
+          .font("Helvetica")
+          .fontSize(9)
+          .text(String(item.name || "-"), mL + colIdW, y + 6, { width: colCompW - 10 });
+        doc
+          .fillColor(COLORS.text)
+          .font("Helvetica")
+          .fontSize(9)
+          .text(String(item.quantity ?? 0), mL + colIdW + colCompW, y + 6, { width: colQtyW - 10, align: "right" });
+
+        doc
+          .moveTo(mL, y + rowH)
+          .lineTo(mL + contentW, y + rowH)
+          .lineWidth(1)
+          .strokeColor("#F3F4F6")
+          .stroke();
+
+        doc.y = y + rowH + 2;
+      };
+
+      for (const group of groups) {
+        ensureSpace(60);
+        const pill = drawGroupHeader(group.name, group.color, group.items.length);
+        drawTableHeader(pill);
+
+        (group.items || [])
+          .slice()
+          .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")))
+          .forEach((it) => {
+            ensureSpace(28);
+            drawRow(it);
+          });
+
+        doc.moveDown(0.5);
       }
 
       doc.end();
     } catch (e) {
-      console.error("PDF generation error:", e);
-      res.status(500).json({ error: "Failed to generate PDF" });
+      console.error("Stocktaking PDF generation error:", e?.body || e);
+      return res.status(500).json({ error: "Failed to generate PDF" });
     }
   },
 );
 
 // ===== Stocktaking Excel download — requires Stocktaking =====
-// Supports BOTH GET (empty inventory) and POST (inventory values from UI)
+// Inventory column has been removed from Stocktaking (UI/PDF/Excel)
+// Excel template matches B2B-school stocktaking Excel template.
+// Supports BOTH GET and POST (POST body is ignored for backward compatibility)
 app.all(
   "/api/stock/excel",
   requireAuth,
   requirePage("Stocktaking"),
   async (req, res) => {
-    try {
-      const inventoryMapRaw = req?.body?.inventory;
-      const inventoryMap =
-        inventoryMapRaw && typeof inventoryMapRaw === "object" ? inventoryMapRaw : {};
+    if (!teamMembersDatabaseId || !stocktakingDatabaseId) {
+      return res.status(500).json({ error: "Database IDs are not configured." });
+    }
 
+    try {
+      // Resolve the current user's school (same logic as /api/stock)
       const userResponse = await notion.databases.query({
         database_id: teamMembersDatabaseId,
         filter: { property: "Name", title: { equals: req.session.username } },
@@ -5189,34 +7412,15 @@ app.all(
           .json({ error: "Could not determine school name for the user." });
 
       const productsNameToIdCode = await _getProductsNameToIdCodeMap();
-      const productsNameToUnityPrice = await _getProductsNameToUnityPriceMap();
-
       const lookupIdCode = (componentName, fallbackProps) => {
         const fromProducts = productsNameToIdCode.get(_normNameKey(componentName));
         return fromProducts || _extractIdCodeFromProps(fallbackProps || {}) || "";
       };
 
-      const lookupUnityPrice = (componentName) => {
-        const n = productsNameToUnityPrice.get(_normNameKey(componentName));
-        return typeof n === "number" && Number.isFinite(n) ? n : null;
-      };
-
-      const createdAt = new Date();
-      const formatDateTime = (date) => {
-        try {
-          const d = date instanceof Date ? date : new Date(date);
-          if (Number.isNaN(d.getTime())) return String(date || "-");
-          return d.toLocaleString("en-GB", {
-            day: "2-digit",
-            month: "short",
-            year: "numeric",
-            hour: "2-digit",
-            minute: "2-digit",
-          });
-        } catch {
-          return String(date || "-");
-        }
-      };
+      // Fetch stock rows
+      const allStock = [];
+      let hasMore = true;
+      let startCursor = undefined;
 
       const numberFrom = (prop) => {
         if (!prop) return undefined;
@@ -5233,10 +7437,6 @@ app.all(
         return 0;
       };
 
-      // Fetch stock rows
-      const allStock = [];
-      let hasMore = true;
-      let startCursor = undefined;
       while (hasMore) {
         const stockResponse = await notion.databases.query({
           database_id: stocktakingDatabaseId,
@@ -5255,28 +7455,32 @@ app.all(
             const quantity = firstDefinedNumber(props[schoolName]);
             const idCode = lookupIdCode(componentName, props);
 
-            // Inventory values come from the UI (POST body). If the key exists, allow 0.
-            let inventory = null;
-            if (inventoryMap && Object.prototype.hasOwnProperty.call(inventoryMap, page.id)) {
-              const n = Number(inventoryMap[page.id]);
-              if (Number.isFinite(n) && n >= 0) inventory = n;
+            let tag = null;
+            if (props.Tag?.select) {
+              tag = {
+                name: props.Tag.select.name,
+                color: props.Tag.select.color || "default",
+              };
+            } else if (
+              Array.isArray(props.Tag?.multi_select) &&
+              props.Tag.multi_select.length > 0
+            ) {
+              const t = props.Tag.multi_select[0];
+              tag = { name: t.name, color: t.color || "default" };
+            } else if (
+              Array.isArray(props.Tags?.multi_select) &&
+              props.Tags.multi_select.length > 0
+            ) {
+              const t = props.Tags.multi_select[0];
+              tag = { name: t.name, color: t.color || "default" };
             }
-
-            let tagName = "Untagged";
-            if (props.Tag?.select?.name) tagName = props.Tag.select.name;
-            else if (Array.isArray(props.Tag?.multi_select) && props.Tag.multi_select[0]?.name)
-              tagName = props.Tag.multi_select[0].name;
-            else if (Array.isArray(props.Tags?.multi_select) && props.Tags.multi_select[0]?.name)
-              tagName = props.Tags.multi_select[0].name;
 
             return {
               id: page.id,
-              tag: tagName,
-              idCode: idCode || "",
-              component: componentName,
-              inStock: Number(quantity) || 0,
-              inventory,
-              unityPrice: lookupUnityPrice(componentName),
+              name: componentName,
+              idCode,
+              tag,
+              quantity: Number(quantity) || 0,
             };
           })
           .filter(Boolean);
@@ -5286,180 +7490,249 @@ app.all(
         startCursor = stockResponse.next_cursor;
       }
 
-      const visibleRows = (allStock || []).filter((r) => Number(r.inStock) > 0);
+      const rows = (allStock || [])
+        .filter((r) => Number(r.quantity) > 0)
+        .slice()
+        .sort((a, b) => {
+          const ta = String(a?.tag?.name || "Untagged");
+          const tb = String(b?.tag?.name || "Untagged");
+          if (ta !== tb) return ta.localeCompare(tb);
+          return String(a?.name || "").localeCompare(String(b?.name || ""));
+        });
 
       const ExcelJS = require("exceljs");
       const wb = new ExcelJS.Workbook();
       wb.creator = "Operations Hub";
       const ws = wb.addWorksheet("Stocktaking");
 
-      // ---- Meta small table (one row) ----
-      // Make the Date cell full-width by merging across the remaining columns.
-      ws.addRow([
-        "School",
-        String(schoolName || "—"),
-        "Date",
-        formatDateTime(createdAt),
-        "",
-        "",
-      ]);
-      ws.mergeCells("D1:F1");
-      const metaRow = ws.getRow(1);
-      metaRow.height = 20;
-      // Style meta cells A1:F1
-      for (const col of [1, 2, 3, 4, 5, 6]) {
-        const cell = metaRow.getCell(col);
-        cell.border = {
-          top: { style: "thin", color: { argb: "FFDDDDDD" } },
-          left: { style: "thin", color: { argb: "FFDDDDDD" } },
-          bottom: { style: "thin", color: { argb: "FFDDDDDD" } },
-          right: { style: "thin", color: { argb: "FFDDDDDD" } },
-        };
-        cell.alignment = { vertical: "middle", horizontal: "left", wrapText: true };
-      }
-      // Label cells
-      [1, 3].forEach((col) => {
-        const c = metaRow.getCell(col);
-        c.font = { bold: true };
-        c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFEFEFEF" } };
-      });
-      // Value cells
-      // Date value is the merged cell starting at D1.
-      [2, 4].forEach((col) => {
-        const c = metaRow.getCell(col);
-        c.font = { bold: true };
-      });
+      const createdAt = new Date();
+      const formattedDate = formatDateTime(createdAt);
 
+      // Stocktaking exports should NOT have Inventory/Defected
+      const columns = ["Tag", "ID Code", "Component", "In Stock", "Unity Price"];
+
+      const colLetter = (n) => {
+        let num = Math.max(1, Number(n) || 1);
+        let s = "";
+        while (num > 0) {
+          const m = (num - 1) % 26;
+          s = String.fromCharCode(65 + m) + s;
+          num = Math.floor((num - 1) / 26);
+        }
+        return s;
+      };
+
+      const lastCol = colLetter(columns.length);
+      const split = Math.ceil(columns.length / 2);
+      const leftEnd = colLetter(split);
+      const rightStart = colLetter(split + 1);
+
+      const safeSchool = String(schoolName)
+        .replace(/[<>:"/\\|?*]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .replace(/\s/g, "_")
+        .slice(0, 50);
+      const fileName = `stocktaking_${safeSchool || "School"}.xlsx`;
+
+      // Title row
+      ws.mergeCells(`A1:${lastCol}1`);
+      ws.getCell("A1").value = "Stocktaking";
+      ws.getCell("A1").font = { size: 18, bold: true };
+      ws.getCell("A1").alignment = { vertical: "middle", horizontal: "center" };
+      ws.getRow(1).height = 28;
+
+      // Subtitle row
+      ws.mergeCells(`A2:${lastCol}2`);
+      ws.getCell("A2").value = `School: ${schoolName}  •  Generated: ${formattedDate}`;
+      ws.getCell("A2").font = { size: 10, color: { argb: "FF6B7280" } };
+      ws.getCell("A2").alignment = { vertical: "middle", horizontal: "center" };
+      ws.getRow(2).height = 18;
+
+      // Spacer
       ws.addRow([]);
 
-      // ---- Data table ----
-      const header = ws.addRow(["Tag", "ID Code", "Component", "In Stock", "Inventory", "Unity Price"]);
-      header.font = { bold: true };
-      header.alignment = { vertical: "middle" };
-      header.eachCell((cell) => {
-        cell.fill = {
-          type: "pattern",
-          pattern: "solid",
-          fgColor: { argb: "FFF7E8F1" }, // light pink-ish to match UI accents
+      // Handover confirmation section
+      ws.mergeCells(`A4:${lastCol}4`);
+      ws.getCell("A4").value = "Handover Confirmation";
+      ws.getCell("A4").font = { size: 14, bold: true };
+      ws.getCell("A4").alignment = { vertical: "middle", horizontal: "left" };
+
+      ws.mergeCells(`A5:${lastCol}5`);
+      ws.getCell("A5").value =
+        "I hereby confirm receiving the below items in good condition. Any discrepancies were noted at delivery.";
+      ws.getCell("A5").font = { size: 9, color: { argb: "FF6B7280" } };
+      ws.getCell("A5").alignment = { wrapText: true, vertical: "top" };
+      ws.getRow(5).height = 28;
+
+      // Info boxes (School / Date)
+      ws.getRow(6).height = 22;
+      ws.mergeCells(`A6:${leftEnd}6`);
+      ws.mergeCells(`${rightStart}6:${lastCol}6`);
+      ws.getCell("A6").value = `School: ${schoolName}`;
+      ws.getCell(`${rightStart}6`).value = `Date: ${formattedDate}`;
+      ["A6", `${rightStart}6`].forEach((addr) => {
+        const c = ws.getCell(addr);
+        c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF9FAFB" } };
+        c.border = {
+          top: { style: "thin", color: { argb: "FFE5E7EB" } },
+          left: { style: "thin", color: { argb: "FFE5E7EB" } },
+          bottom: { style: "thin", color: { argb: "FFE5E7EB" } },
+          right: { style: "thin", color: { argb: "FFE5E7EB" } },
         };
+        c.font = { size: 10, bold: true };
+        c.alignment = { vertical: "middle", horizontal: "left" };
+      });
+
+      // Signature boxes (kept to match B2B-school template)
+      ws.getRow(7).height = 26;
+      ws.mergeCells(`A7:${leftEnd}7`);
+      ws.mergeCells(`${rightStart}7:${lastCol}7`);
+      ws.getCell("A7").value = "Inventory Team Names / Signatures";
+      ws.getCell(`${rightStart}7`).value = "Stockholder Name / Signature";
+      ["A7", `${rightStart}7`].forEach((addr) => {
+        const c = ws.getCell(addr);
+        c.border = {
+          top: { style: "thin", color: { argb: "FFE5E7EB" } },
+          left: { style: "thin", color: { argb: "FFE5E7EB" } },
+          bottom: { style: "thin", color: { argb: "FFE5E7EB" } },
+          right: { style: "thin", color: { argb: "FFE5E7EB" } },
+        };
+        c.font = { size: 9, bold: true, color: { argb: "FF6B7280" } };
+        c.alignment = { vertical: "middle", horizontal: "left" };
+      });
+      // Signature line row
+      ws.getRow(8).height = 18;
+      ws.mergeCells(`A8:${leftEnd}8`);
+      ws.mergeCells(`${rightStart}8:${lastCol}8`);
+      ["A8", `${rightStart}8`].forEach((addr) => {
+        const c = ws.getCell(addr);
+        c.border = { bottom: { style: "thin", color: { argb: "FFE5E7EB" } } };
+      });
+
+      // Spacer
+      ws.addRow([]);
+
+      // Table header
+      const headerRowIndex = ws.lastRow.number + 1;
+      ws.addRow(columns);
+      const headerRow = ws.getRow(headerRowIndex);
+      headerRow.font = { bold: true, color: { argb: "FF065F46" } };
+      headerRow.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFECFDF5" } };
+      headerRow.alignment = { vertical: "middle", horizontal: "left" };
+      headerRow.height = 20;
+      headerRow.eachCell((cell) => {
         cell.border = {
-          top: { style: "thin", color: { argb: "FFDDDDDD" } },
-          left: { style: "thin", color: { argb: "FFDDDDDD" } },
-          bottom: { style: "thin", color: { argb: "FFDDDDDD" } },
-          right: { style: "thin", color: { argb: "FFDDDDDD" } },
+          top: { style: "thin", color: { argb: "FFE5E7EB" } },
+          left: { style: "thin", color: { argb: "FFE5E7EB" } },
+          bottom: { style: "thin", color: { argb: "FFE5E7EB" } },
+          right: { style: "thin", color: { argb: "FFE5E7EB" } },
         };
       });
 
-// Sort by Tag (ascending) and put "Untagged" at the end.
-// Also: insert a blank row between different tag groups (as requested).
-const groupsMap = new Map();
-(visibleRows || []).forEach((r) => {
-  const tagName = String(r.tag || "Untagged").trim() || "Untagged";
-  const key = _normNameKey(tagName);
-  if (!groupsMap.has(key)) groupsMap.set(key, { name: tagName, items: [] });
-  groupsMap.get(key).items.push(r);
-});
-
-let groups = Array.from(groupsMap.values()).sort((a, b) =>
-  String(a.name).localeCompare(String(b.name)),
-);
-const untaggedGroups = groups.filter(
-  (g) => _normNameKey(g.name) === "untagged" || String(g.name).trim() === "-",
-);
-groups = groups
-  .filter(
-    (g) =>
-      !(_normNameKey(g.name) === "untagged" || String(g.name).trim() === "-"),
-  )
-  .concat(untaggedGroups);
-
-groups.forEach((g, gi) => {
-  const items = (g.items || []).slice().sort((a, b) =>
-    String(a.component || "").localeCompare(String(b.component || "")),
-  );
-
-  for (const r of items) {
-    const row = ws.addRow([
-      r.tag || "Untagged",
-      r.idCode || "",
-      r.component || "",
-      Number(r.inStock) || 0,
-      r.inventory === null || typeof r.inventory === "undefined"
-        ? ""
-        : Number(r.inventory),
-      r.unityPrice === null || typeof r.unityPrice === "undefined"
-        ? ""
-        : Number(r.unityPrice),
-    ]);
-    row.getCell(4).numFmt = "0";
-    row.getCell(5).numFmt = "0";
-    // Currency format (GBP) for Unity Price
-    row.getCell(6).numFmt = "£#,##0.00";
-    row.eachCell((cell) => {
-      cell.border = {
-        top: { style: "thin", color: { argb: "FFEEEEEE" } },
-        left: { style: "thin", color: { argb: "FFEEEEEE" } },
-        bottom: { style: "thin", color: { argb: "FFEEEEEE" } },
-        right: { style: "thin", color: { argb: "FFEEEEEE" } },
+      // Column widths
+      const widthByHeader = {
+        "Tag": 32,
+        "ID Code": 14,
+        "Component": 52,
+        "In Stock": 12,
+        "Unity Price": 14,
       };
-      cell.alignment = { vertical: "middle", wrapText: true };
-    });
+      columns.forEach((h, idx) => {
+        ws.getColumn(idx + 1).width = widthByHeader[h] || 12;
+      });
 
-    // If Inventory differs from In Stock, make the Inventory number red (Excel only)
-    const invCell = row.getCell(5);
-    const invVal = invCell.value;
-    const invNum = typeof invVal === "number" ? invVal : Number(invVal);
-    const stockNum = Number(r.inStock) || 0;
-    if (
-      invVal !== "" &&
-      invVal !== null &&
-      typeof invVal !== "undefined" &&
-      Number.isFinite(invNum) &&
-      Number.isFinite(stockNum) &&
-      invNum !== stockNum
-    ) {
-      invCell.font = { ...(invCell.font || {}), color: { argb: "FFDC2626" } };
-    }
-  }
+      // Unit price map
+      const unitPriceMap = await _getProductsNameToUnityPriceMap();
+      const unitPriceOf = (componentName) => {
+        const n = unitPriceMap.get(_normNameKey(componentName));
+        if (typeof n === "number" && Number.isFinite(n)) return n;
+        return null;
+      };
 
-  // blank row between tag groups (except after last)
-  if (gi !== groups.length - 1) {
-    ws.addRow([]);
-  }
-});
+      // Notion tag color map for Excel
+      const notionColorToARGB = (color = "default") => {
+        switch (color) {
+          case "gray":
+            return { fg: "FFF3F4F6", text: "FF374151" };
+          case "brown":
+            return { fg: "FFEFEBE9", text: "FF4E342E" };
+          case "orange":
+            return { fg: "FFFFF7ED", text: "FF9A3412" };
+          case "yellow":
+            return { fg: "FFFEFCE8", text: "FF854D0E" };
+          case "green":
+            return { fg: "FFECFDF5", text: "FF065F46" };
+          case "blue":
+            return { fg: "FFEFF6FF", text: "FF1E40AF" };
+          case "purple":
+            return { fg: "FFF5F3FF", text: "FF5B21B6" };
+          case "pink":
+            return { fg: "FFFDF2F8", text: "FF9D174D" };
+          case "red":
+            return { fg: "FFFEF2F2", text: "FF991B1B" };
+          default:
+            return { fg: "FFF3F4F6", text: "FF374151" };
+        }
+      };
 
-      ws.columns = [
-        { width: 18 }, // Tag
-        { width: 14 }, // ID Code
-        { width: 44 }, // Component
-        { width: 12 }, // In Stock
-        { width: 12 }, // Inventory
-        { width: 14 }, // Unity Price
-      ];
+      // Data rows
+      for (const r of rows) {
+        const tagName = r?.tag?.name || "Untagged";
+        const tagColor = r?.tag?.color || "default";
+        const price = unitPriceOf(r.name);
 
-      // Freeze the meta rows + header row
-      ws.views = [{ state: "frozen", ySplit: 3 }];
+        const rowValues = [
+          tagName,
+          r.idCode || "",
+          r.name || "-",
+          Number(r.quantity) || 0,
+          price === null ? "" : price,
+        ];
 
-      const safeSchool = String(schoolName || "school")
-        .replace(/[\\/:*?"<>|]/g, "-")
-        .replace(/\s+/g, "_")
-        .slice(0, 60);
-      const fileName = `stocktaking_${safeSchool}.xlsx`;
+        const row = ws.addRow(rowValues);
 
-      const buf = await wb.xlsx.writeBuffer();
+        // Tag pill style
+        const tagCell = row.getCell(1);
+        const c = notionColorToARGB(tagColor);
+        tagCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: c.fg } };
+        tagCell.font = { bold: true, color: { argb: c.text } };
+        tagCell.alignment = { vertical: "middle", horizontal: "left" };
+
+        // Borders
+        row.eachCell((cell) => {
+          cell.border = {
+            top: { style: "thin", color: { argb: "FFF3F4F6" } },
+            left: { style: "thin", color: { argb: "FFF3F4F6" } },
+            bottom: { style: "thin", color: { argb: "FFF3F4F6" } },
+            right: { style: "thin", color: { argb: "FFF3F4F6" } },
+          };
+        });
+
+        // Numeric alignment
+        const idxInStock = columns.indexOf("In Stock") + 1;
+        const idxPrice = columns.indexOf("Unity Price") + 1;
+        if (idxInStock > 0) row.getCell(idxInStock).alignment = { vertical: "middle", horizontal: "right" };
+        if (idxPrice > 0) row.getCell(idxPrice).alignment = { vertical: "middle", horizontal: "right" };
+
+        // Unity price format
+        if (price !== null && idxPrice > 0) {
+          row.getCell(idxPrice).numFmt = '"EGP" #,##0.00';
+        }
+      }
+
       res.setHeader(
         "Content-Type",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       );
-      res.setHeader(
-        "Content-Disposition",
-        `attachment; filename="${fileName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`,
-      );
+      res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
       res.setHeader("Cache-Control", "no-store");
-      res.send(Buffer.from(buf));
+
+      await wb.xlsx.write(res);
+      res.end();
     } catch (e) {
-      console.error("Stocktaking Excel generation error:", e.body || e);
-      res.status(500).json({ error: "Failed to export Excel" });
+      console.error("Stocktaking Excel generation error:", e?.body || e);
+      return res.status(500).json({ error: "Failed to export Excel" });
     }
   },
 );
@@ -6099,17 +8372,28 @@ app.get("/api/expenses", async (req, res) => {
       return res.json({ success: true, items: [] });
     }
 
-    // Query only expenses that belong to THIS user
-    const list = await notion.databases.query({
-      database_id: process.env.Expenses_Database,
-      filter: {
-        property: "Team Member",
-        relation: {
-          contains: teamMemberPageId
-        }
-      },
-      sorts: [{ property: "Date", direction: "descending" }]
-    });
+        // Query only expenses that belong to THIS user (paginate to avoid Notion 100-item limit)
+    const results = [];
+    let cursor = undefined;
+    let hasMore = true;
+
+    while (hasMore) {
+      const resp = await notion.databases.query({
+        database_id: expensesDatabaseId || process.env.Expenses_Database,
+        start_cursor: cursor,
+        filter: {
+          property: "Team Member",
+          relation: {
+            contains: teamMemberPageId,
+          },
+        },
+        sorts: [{ property: "Date", direction: "descending" }],
+      });
+
+      results.push(...(resp.results || []));
+      hasMore = resp.has_more;
+      cursor = resp.next_cursor;
+    }
 
     // Format results (support Reason as title OR rich_text)
     const expProps = await getExpensesDBProps();
@@ -6121,7 +8405,7 @@ app.get("/api/expenses", async (req, res) => {
     const cashInFromTitleMap = new Map();
     const cashInFromIds = new Set();
 
-    for (const page of list.results) {
+    for (const page of results) {
       const p = page.properties?.[cashInFromKey];
       if (p?.type === "relation") {
         (p.relation || []).forEach((r) => r?.id && cashInFromIds.add(r.id));
@@ -6133,7 +8417,7 @@ app.get("/api/expenses", async (req, res) => {
       cashInFromTitleMap.set(id, t);
     }
 
-    const formatted = list.results.map((page) => {
+    const formatted = results.map((page) => {
       const props = page.properties || {};
 
       const reasonProp = props["Reason"]; // property name in Notion DB
@@ -6221,22 +8505,28 @@ app.get(
           const rel = props["Team Member"]?.relation;
 
           if (!Array.isArray(rel) || rel.length === 0) continue;
-
-          const userId = rel[0].id;
           const cashIn = Number(props["Cash in"]?.number || 0);
           const cashOut = Number(props["Cash out"]?.number || 0);
           const delta = cashIn - cashOut;
 
-          if (!perUser.has(userId)) {
-            perUser.set(userId, {
-              userId,
-              total: 0,
-              count: 0,
-            });
+          // Team Member is a relation and may contain multiple members.
+          // Aggregate for EACH related member so totals match the user-specific endpoint
+          // (which uses relation.contains).
+          for (const r of rel) {
+            const userId = r?.id;
+            if (!userId) continue;
+
+            if (!perUser.has(userId)) {
+              perUser.set(userId, {
+                userId,
+                total: 0,
+                count: 0,
+              });
+            }
+            const agg = perUser.get(userId);
+            agg.total += delta;
+            agg.count += 1;
           }
-          const agg = perUser.get(userId);
-          agg.total += delta;
-          agg.count += 1;
         }
 
         hasMore = resp.has_more;
@@ -6294,15 +8584,27 @@ app.get(
           .status(400)
           .json({ success: false, error: "Missing memberId" });
       }
+      // Paginate to avoid Notion 100-item limit
+      const results = [];
+      let cursor = undefined;
+      let hasMore = true;
 
-      const list = await notion.databases.query({
-        database_id: expensesDatabaseId,
-        filter: {
-          property: "Team Member",
-          relation: { contains: memberId },
-        },
-        sorts: [{ property: "Date", direction: "descending" }],
-      });
+      while (hasMore) {
+        const resp = await notion.databases.query({
+          database_id: expensesDatabaseId,
+          start_cursor: cursor,
+          filter: {
+            property: "Team Member",
+            relation: { contains: memberId },
+          },
+          sorts: [{ property: "Date", direction: "descending" }],
+        });
+
+        results.push(...(resp.results || []));
+        hasMore = resp.has_more;
+        cursor = resp.next_cursor;
+      }
+
 
             // Resolve Cash in from (rich_text OR relation) + support Reason as title/rich_text
       const expProps = await getExpensesDBProps();
@@ -6314,7 +8616,7 @@ app.get(
       const cashInFromTitleMap = new Map();
       const cashInFromIds = new Set();
 
-      for (const page of list.results) {
+      for (const page of results) {
         const p = page.properties?.[cashInFromKey];
         if (p?.type === "relation") {
           (p.relation || []).forEach((r) => r?.id && cashInFromIds.add(r.id));
@@ -6326,7 +8628,7 @@ app.get(
         cashInFromTitleMap.set(id, t);
       }
 
-      const items = list.results.map((page) => {
+      const items = results.map((page) => {
         const props = page.properties || {};
 
         const reasonProp = props["Reason"]; // property name in Notion DB
