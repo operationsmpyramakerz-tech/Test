@@ -604,7 +604,7 @@ body.tasks-v2 .tv2-progress__fill{
   top: 0;
   bottom: 0;
   width: 0;
-  background: linear-gradient(90deg, #A8FF6A 0%, #4FFFE0 100%);
+  background: linear-gradient(90deg, #168116 0%, #168116 100%);
   border-radius: 999px;
   box-shadow: 0 0 22px rgba(79,255,224,0.65);
 }
