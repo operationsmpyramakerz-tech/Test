@@ -1,0 +1,329 @@
+   Expenses Page (mobile UI)
+   ========================= */
+.expenses-page {
+  padding: 1.5rem 1.5rem 2rem;
+}
+
+.expenses-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: 1.5rem;
+  align-items: flex-start;
+}
+
+@media (max-width: 900px) {
+  .expenses-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Columns */
+.expenses-col {
+  background: transparent;
+}
+
+/* Top bar (Dashboard + avatar) */
+.exp-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+
+.exp-dots {
+  display: inline-flex;
+  gap: 4px;
+}
+.exp-dots span {
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: #000000;
+}
+
+.exp-title {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #000000;
+}
+
+.exp-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  overflow: hidden;
+  border: 1px solid #E5E7EB;
+  background: #E5E7EB;
+}
+.exp-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* Balance Card */
+.exp-balance-card {
+  background: #000000;
+  border-radius: 22px;
+  padding: 1.4rem 1.2rem;
+  margin-bottom: 1.5rem;
+  color: #fff;
+  box-shadow: 0 16px 40px rgba(15,23,42,0.35);
+}
+
+.exp-balance-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.exp-balance-currency {
+  font-size: 1.2rem;
+  font-weight: 600;
+}
+.exp-balance-amount {
+  font-size: 2rem;
+  font-weight: 800;
+}
+.exp-balance-currency-small {
+  font-size: 0.9rem;
+  margin-left: auto;
+  opacity: 0.9;
+}
+.exp-balance-label {
+  margin-top: .5rem;
+  font-size: .85rem;
+  opacity: .7;
+}
+
+/* Section head (All Expenses) */
+.exp-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: .6rem;
+}
+.exp-section-title {
+  font-weight: 700;
+  font-size: .95rem;
+  color: #000000;
+}
+.exp-view-all {
+  border: 0;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: .8rem;
+  background: #F3F4F6;
+  color: #000000;
+  cursor: pointer;
+}
+
+/* Day blocks */
+.exp-day-block {
+  margin-bottom: 1rem;
+}
+.exp-day-label {
+  font-size: .8rem;
+  font-weight: 600;
+  color: #9CA3AF;
+  margin-bottom: .4rem;
+}
+
+/* Expenses list */
+.exp-list {
+  display: grid;
+  gap: .6rem;
+}
+
+.exp-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  padding: .7rem .8rem;
+  border-radius: 18px;
+  background: #F3F4F6;
+}
+
+.exp-item-left {
+  display: flex;
+  align-items: center;
+  gap: .65rem;
+  min-width: 0;
+}
+
+.exp-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  background: #8b5cf6; /* purple */
+  color: #fff;
+  box-shadow: 0 10px 25px rgba(139,92,246,0.6);
+}
+.exp-icon-emoji {
+  font-size: 1.2rem;
+}
+
+.exp-item-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.exp-item-title {
+  font-size: .9rem;
+  font-weight: 700;
+  color: #000000;
+}
+.exp-item-sub {
+  font-size: .78rem;
+  color: #6B7280;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+
+.exp-item-right {
+  font-weight: 700;
+  font-size: .9rem;
+  color: #000000;
+}
+
+/* Floating add button (bottom right of left card) */
+.exp-floating-add {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  width: 46px;
+  height: 46px;
+  border-radius: 999px;
+  border: 0;
+  background: #000000;
+  color: #fff;
+  font-size: 1.6rem;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  box-shadow: 0 16px 35px rgba(0,0,0,0.35);
+  z-index: 50;
+}
+
+@media (min-width: 900px) {
+  .exp-floating-add {
+    position: absolute;
+    bottom: -10px;
+    right: 12px;
+  }
+}
+
+/* Right column: Add Amount */
+.exp-add-card {
+  background: #ffffff;
+  border-radius: 22px;
+  padding: 1.4rem 1.2rem 1.6rem;
+  box-shadow: 0 12px 30px rgba(15,23,42,0.12);
+  border: 1px solid #E5E7EB;
+}
+.exp-add-title {
+  margin: 0 0 1.2rem;
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #000000;
+}
+
+/* Amount row */
+.exp-field-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: .8rem;
+}
+.exp-field-row--amount {
+  margin-bottom: 1.2rem;
+}
+.exp-field-label {
+  font-size: .8rem;
+  font-weight: 600;
+  color: #6B7280;
+}
+.exp-amount-display {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.exp-amount-currency {
+  font-size: 1.2rem;
+  font-weight: 600;
+}
+.exp-amount-value {
+  font-size: 1.6rem;
+  font-weight: 800;
+}
+.exp-amount-currency-small {
+  font-size: .9rem;
+  margin-left: 4px;
+}
+
+/* Select + description */
+.exp-field-group {
+  margin-bottom: 1rem;
+}
+.exp-select {
+  width: 100%;
+  margin-top: .35rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-radius: 12px;
+  border: 1px solid #E5E7EB;
+  padding: .75rem .9rem;
+  background: #F9FAFB;
+  cursor: pointer;
+  font-size: .9rem;
+}
+.exp-select-caret {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: #E5E7EB;
+  display: grid;
+  place-items: center;
+  font-size: .7rem;
+}
+.exp-description {
+  margin-top: .35rem;
+  font-size: .9rem;
+  color: #000000;
+}
+
+/* Keypad */
+.exp-keypad {
+  margin-top: 1.2rem;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: .6rem;
+}
+.exp-keypad button {
+  height: 52px;
+  border-radius: 16px;
+  border: 0;
+  background: #F3F4F6;
+  font-size: 1.1rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 10px rgba(15,23,42,0.08);
+}
+.exp-keypad button:active {
+  transform: translateY(1px);
+  box-shadow: 0 2px 5px rgba(15,23,42,0.08);
+}
+.exp-keypad-icon {
+  font-size: .95rem;
+}
+.exp-keypad-confirm {
+  background: #8b5cf6;
+  color: #fff;
+  box-shadow: 0 12px 30px rgba(139,92,246,0.6);
+}
+
