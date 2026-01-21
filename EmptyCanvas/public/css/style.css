@@ -4,7 +4,7 @@
 :root {
   --primary-color: #EA580C; /* Orange */
   --primary-color-dark: #C2410C;
-  --text-primary: #1F2937;
+  --text-primary: #000000;
   --text-secondary: #6B7280;
   --bg-main: #FFFFFF;
   --bg-card: #FFFFFF;
@@ -80,7 +80,7 @@ body.sidebar-collapsed .sidebar{ transform:translateX(calc(-100% - 14px)); }
   align-items:center;
   justify-content:center;
   gap:12px;
-  border-bottom:1px solid #1F2937;
+  border-bottom:1px solid #000000;
 }
 .sidebar-header .logo{ height:32px; margin-right:.75rem; }
 .sidebar-header h2{ margin:0; font-size:1.25rem; color:#F9FAFB; }
@@ -155,14 +155,14 @@ body.sidebar-mini .sidebar-brand-toggle .brand-logo-icon{
   align-items:center;
   gap:12px;
   padding:1rem 1.5rem;
-  border-bottom:1px solid #1F2937;
+  border-bottom:1px solid #000000;
 }
 .sidebar-profile__avatar{
   width:44px;
   height:44px;
   border-radius:50%;
   overflow:hidden;
-  background:#1F2937;
+  background:#000000;
   border:1px solid #374151;
   display:grid;
   place-items:center;
@@ -212,7 +212,7 @@ body.sidebar-mini .sidebar-brand-toggle .brand-logo-icon{
   display:flex; align-items:center; gap:.75rem; padding:.75rem 1rem; border-radius:6px; text-decoration:none;
   color:#9CA3AF; font-weight:500; margin-bottom:.5rem; transition:background-color .2s, color .2s;
 }
-.nav-link:hover{ background:#1F2937; color:#fff; }
+.nav-link:hover{ background:#000000; color:#fff; }
 .nav-link.active{ 
   background:var(--primary-color); 
   color:#fff; 
@@ -221,7 +221,7 @@ body.sidebar-mini .sidebar-brand-toggle .brand-logo-icon{
 }
 .sidebar-footer{
   padding:1.5rem;
-  border-top:1px solid #1F2937;
+  border-top:1px solid #000000;
   display:flex;
   flex-direction:column;
   align-items:center;
@@ -474,7 +474,7 @@ hr{ border:none; border-top:1px solid #eee; margin:1.5rem 0; }
 }
 
 .sidebar-toggle{
-  background:#1F2937; color:#FFFFFF; border:1px solid #374151;
+  background:#000000; color:#FFFFFF; border:1px solid #374151;
   width:32px; height:32px; border-radius:50%; display:flex; align-items:center; justify-content:center; margin-left:auto; padding:0; cursor:pointer;
   transition:background-color .2s ease, color .2s ease;
   display:none !important;
@@ -2040,7 +2040,7 @@ button.is-auto-busy::after {
 }
 
 .sidebar-nav .nav-list .nav-link:hover {
-  background: #1F2937;
+  background: #000000;
   color: #fff;
 }
 
@@ -2918,7 +2918,7 @@ body.sidebar-mini .sidebar-nav .nav-link .icon {
 .toast-warning .toast-icon, .toast-box.toast-warning .toast-icon{ background:#fff7ed; color:#9a3412; }
 .toast-error .toast-icon, .toast-box.toast-error .toast-icon{ background:#fef2f2; color:#991b1b; }
 
-.toast-title{ font-weight:700; color:#0f172a; line-height:1.2; }
+.toast-title{ font-weight:700; color:#000000; line-height:1.2; }
 .toast-msg{ color:#475569; margin-top:2px; }
 
 .toast-close{
@@ -3056,7 +3056,7 @@ body.sidebar-mini .sidebar-nav .nav-link .icon {
 
 /* Active state */
 #svTabs .tab-chip.active{
-  background:#fff; color:#1F2937;
+  background:#fff; color:#000000;
   border-color:#3B82F6;
   box-shadow:
     0 1px 2px rgba(16,24,40,.05),
@@ -3494,7 +3494,7 @@ main:has(#sv-list) {
 .sidebar-footer {
   flex: 0 0 auto;
   margin-top: auto;                /* pins it to the bottom of the flex column */
-  background: var(--sidebar-bg, #0f172a);
+  background: var(--sidebar-bg, #000000);
   border-top: 1px solid rgba(255,255,255,0.06);
   /* Keep it at the bottom via flex (more reliable than sticky inside fixed). */
 }
