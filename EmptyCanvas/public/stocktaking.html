@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+  <link rel="manifest" href="/manifest.webmanifest" />
+<meta name="theme-color" content="#ffffff" />
+
+<link rel="icon" href="/icons/icon-192.png" />
+<link rel="apple-touch-icon" href="/icons/icon-192.png" />
+
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+
+<script src="/pwa-register.js" defer></script>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Stocktaking - Dashboard</title>
+<!-- CRITICAL: Prevent sidebar links flash before CSS/permissions load -->
+<style>
+  body.permissions-loading .sidebar li { display: none !important; }
+</style>
+<link href="/css/style.css" rel="stylesheet"/>
+<script src="https://unpkg.com/feather-icons"></script>
+</head>
+<body class="permissions-loading">
+<script>
+    (function() {
+      try {
+        if (window.innerWidth > 768 && localStorage.getItem('ui.sidebarMini') === '1') {
+          document.body.classList.add('sidebar-mini');
+        }
+      } catch(e) {}
+    })();
+  </script>
+<div class="app-container">
+<aside class="sidebar">
+<div class="sidebar-header">
+<h2>Dashboard</h2>
+<button aria-expanded="true" aria-label="Toggle sidebar" class="sidebar-toggle" id="sidebar-toggle">
+<i data-feather="chevrons-left"></i>
+</button>
+</div>
+<!-- Sidebar: flat links -->
+<nav class="sidebar-nav">
+<ul class="nav-list">
+<li><a class="nav-link" href="/orders"><i data-feather="list"></i><span class="nav-label">Current Orders</span></a></li>
+        <li><a class="nav-link" href="/orders/requested"><i data-feather="users"></i><span class="nav-label">Operations Orders</span></a></li>
+        <li><a class="nav-link" href="/orders/new"><i data-feather="plus-circle"></i><span class="nav-label">Create New Order</span></a></li>
+        <li><a class="nav-link active" href="/stocktaking"><i data-feather="archive"></i><span class="nav-label">Stocktaking</span></a></li>
+        <li><a class="nav-link" href="/orders/sv-orders"><i data-feather="award"></i><span class="nav-label">S.V schools orders</span></a></li>
+        <li><a class="nav-link" href="/expenses"><i data-feather="dollar-sign"></i><span class="nav-label">Expenses</span></a></li>
+        <li><a class="nav-link" href="/expenses/users"><i data-feather="users"></i><span class="nav-label">Expenses by User</span></a></li>
+  <li><a class="nav-link" href="/tasks"><i data-feather="check-square"></i><span class="nav-label">Tasks</span></a></li>
+</ul>
+</nav>
+<div class="sidebar-footer">
+<button class="logout-btn" id="logoutBtn"><i data-feather="log-out"></i> Logout</button>
+</div>
+</aside>
+<div class="main-content">
+<header class="main-header">
+<div class="header-row1">
+<div class="left">
+<div aria-live="polite" class="greeting-pill">
+<span class="greeting-avatar">
+<img alt="Hi icon" src="/images/greeting-icon.png"/>
+</span>
+<div class="greet-text">
+<div class="greet-title">Hi, <span data-username="">...</span> 👋</div>
+<div class="greet-sub">Start your day with operations</div>
+</div>
+</div>
+<div class="searchbar" id="stock-searchbar" role="search" style="margin-left:8px;">
+<i data-feather="search"></i>
+<input aria-label="Search components" id="stockSearch" placeholder="Search components..." type="search"/>
+</div>
+</div>
+<div class="right topbar-right">
+<a aria-label="My account" class="account-mini" href="/account" title="My account">
+<span class="ico-circle"><img alt="Logo" src="/images/logo.png"/></span>
+<span class="label">My account</span>
+</a>
+</div>
+</div>
+<div class="header-row2">
+<h1 class="page-title">Stocktaking</h1>
+</div>
+</header>
+<main class="container-full-width">
+<section class="card">
+<div class="card-toolbar">
+<button class="btn btn--light" id="downloadPdfBtn">
+<i data-feather="download"></i>
+<span>Download PDF</span>
+</button>
+
+<button class="btn btn--light" id="downloadExcelBtn" style="margin-left:10px;">
+<i data-feather="download"></i>
+<span>Download Excel</span>
+</button>
+</div>
+<div class="groups-grid" id="stock-groups">
+  <div class="modern-loading" role="status" aria-live="polite">
+    <div class="modern-loading__spinner" aria-hidden="true"></div>
+    <div class="modern-loading__text">
+      Loading stock data
+      <span class="modern-loading__dots" aria-hidden="true"><span></span><span></span><span></span></span>
+    </div>
+  </div>
+</div>
+</section>
+</main>
+</div>
+</div>
+<script>feather.replace();</script>
+<script src="/js/common-ui.js"></script>
+<script src="/js/script.js"></script>
+<script src="/js/stocktaking.js"></script>
+</body>
+</html>

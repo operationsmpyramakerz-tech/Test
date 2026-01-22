@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#ffffff" />
+
+  <link rel="icon" href="/icons/icon-192.png" />
+  <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+
+  <script src="/pwa-register.js" defer></script>
+
+  <meta charset="utf-8"/>
+  <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+  <title>Tasks</title>
+
+  <!-- CRITICAL: Prevent sidebar links flash before CSS/permissions load -->
+  <style>
+    body.permissions-loading .sidebar li { display: none !important; }
+  </style>
+
+  <link href="/css/style.css" rel="stylesheet"/>
+  <link href="/css/tasks.css" rel="stylesheet"/>
+  <script src="https://unpkg.com/feather-icons"></script>
+</head>
+
+<body class="permissions-loading tasks-v2">
+  <script>
+    (function() {
+      try {
+        if (window.innerWidth > 768 && localStorage.getItem('ui.sidebarMini') === '1') {
+          document.body.classList.add('sidebar-mini');
+        }
+      } catch(e) {}
+    })();
+  </script>
+
+  <div class="app-container">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <h2>Dashboard</h2>
+        <button aria-expanded="true" aria-label="Toggle sidebar" class="sidebar-toggle" id="sidebar-toggle">
+          <i data-feather="chevrons-left"></i>
+        </button>
+      </div>
+
+      <nav class="sidebar-nav">
+        <ul class="nav-list">
+          <li><a class="nav-link" href="/orders"><i data-feather="list"></i><span class="nav-label">Current Orders</span></a></li>
+          <li><a class="nav-link" href="/orders/requested"><i data-feather="users"></i><span class="nav-label">Operations Orders</span></a></li>
+          <li><a class="nav-link" href="/orders/new"><i data-feather="plus-circle"></i><span class="nav-label">Create New Order</span></a></li>
+          <li><a class="nav-link" href="/stocktaking"><i data-feather="archive"></i><span class="nav-label">Stocktaking</span></a></li>
+          <li><a class="nav-link active" href="/tasks"><i data-feather="check-square"></i><span class="nav-label">Tasks</span></a></li>
+          <li><a class="nav-link" href="/b2b"><i data-feather="folder"></i><span class="nav-label">B2B</span></a></li>
+          <li><a class="nav-link" href="/logistics"><i data-feather="truck"></i><span class="nav-label">Logistics</span></a></li>
+          <li><a class="nav-link" href="/damaged-assets"><i data-feather="alert-triangle"></i><span class="nav-label">Damaged Assets</span></a></li>
+          <li><a class="nav-link" href="/orders/sv-orders"><i data-feather="award"></i><span class="nav-label">S.V schools orders</span></a></li>
+          <li><a class="nav-link" href="/expenses"><i data-feather="dollar-sign"></i><span class="nav-label">Expenses</span></a></li>
+          <li><a class="nav-link" href="/expenses/users"><i data-feather="users"></i><span class="nav-label">Expenses by User</span></a></li>
+        </ul>
+      </nav>
+
+      <div class="sidebar-footer">
+        <button class="logout-btn" id="logoutBtn"><i data-feather="log-out"></i> Logout</button>
+      </div>
+    </aside>
+
+    <div class="main-content">
+      <main class="tasks-v2-main">
+        <div class="tasks-v2-shell">
+          <div class="tasks-v2-panels">
+
+            <!-- Left screen (calendar + tasks list) -->
+            <section class="tasks-v2-panel tasks-v2-panel--list" aria-label="Tasks">
+              <div class="tasks-v2-hero">
+                <div class="tasks-v2-topbar">
+                  <button class="tasks-v2-icon-btn" type="button" aria-label="Open menu" id="tasksV2MenuBtn">
+                    <i data-feather="menu"></i>
+                  </button>
+
+                  <div class="tasks-v2-actions" aria-label="Actions">
+                    <div class="tasks-v2-dropdown-wrap">
+                      <button
+                        class="tasks-v2-icon-btn"
+                        type="button"
+                        aria-label="Filter tasks"
+                        id="tasksV2FilterBtn"
+                        aria-haspopup="menu"
+                        aria-expanded="false"
+                      >
+                        <i data-feather="sliders"></i>
+                      </button>
+
+                      <div class="tasks-v2-dropdown" id="tasksV2FilterMenu" role="menu" aria-label="Tasks filter" hidden></div>
+                    </div>
+                  </div>
+                </div>
+
+                <button class="tasks-v2-month" type="button" aria-label="Select month" id="tasksV2MonthBtn">
+                  <span id="tasksV2MonthLabel">—</span>
+                  <i data-feather="chevron-down"></i>
+                </button>
+
+                <div class="tasks-v2-calendar" aria-label="Calendar">
+                  <div class="tasks-v2-days" role="tablist" aria-label="Select day" id="tasksV2Days"></div>
+                </div>
+              </div>
+
+              <div class="tasks-v2-list" id="tasksGrid">
+                <div class="modern-loading" role="status" aria-live="polite">
+                  <div class="modern-loading__spinner" aria-hidden="true"></div>
+                  <div class="modern-loading__text">
+                    Loading tasks
+                    <span class="modern-loading__dots" aria-hidden="true"><span></span><span></span><span></span></span>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+          </div>
+        </div>
+
+        <!-- Task details "page" (opens when a task is clicked) -->
+        <section class="tasks-v2-panel tasks-v2-panel--detail" aria-label="Task details">
+          <div class="tasks-v2-sheet">
+            <div class="tasks-v2-sheet__top">
+              <button class="tasks-v2-icon-btn tasks-v2-icon-btn--light" type="button" aria-label="Close" id="taskDetailCloseBtn">
+                <i data-feather="x"></i>
+              </button>
+
+              <button class="tasks-v2-icon-btn tasks-v2-icon-btn--light" type="button" aria-label="Open in Notion" id="taskDetailOpenNotionBtn">
+                <i data-feather="edit-2"></i>
+              </button>
+            </div>
+
+            <div class="tasks-v2-time-pill" id="taskDetailTimePill">—</div>
+
+            <h2 class="tasks-v2-detail-title" id="taskDetailTitle">Select a task</h2>
+            <p class="tasks-v2-detail-sub" id="taskDetailSub">Choose a task from the left list.</p>
+
+            <div class="tv2-avatars tv2-avatars--center" aria-label="Participants" id="taskDetailAvatars"></div>
+
+            <div class="tasks-v2-plan-heading">Plan</div>
+
+            <div class="tv2-plan" id="taskDetailBody">
+              <div class="tv2-plan-item">
+                <div class="tv2-plan-item__txt">No task selected</div>
+                <div class="tv2-plan-item__time">—</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Month/Year picker (opens when clicking the month label) -->
+        <div class="tv2-month-picker" id="tasksV2MonthPicker" aria-hidden="true" hidden>
+          <div class="tv2-month-picker__backdrop" data-close aria-hidden="true"></div>
+
+          <div class="tv2-month-picker__sheet" role="dialog" aria-modal="true" aria-label="Select month and year">
+            <div class="tv2-month-picker__header">
+              <button class="tasks-v2-icon-btn tasks-v2-icon-btn--light tv2-month-picker__nav" type="button" id="tasksV2YearPrev" aria-label="Previous year">
+                <i data-feather="chevron-left"></i>
+              </button>
+
+              <button class="tv2-month-picker__year" type="button" id="tasksV2YearLabel" aria-label="Select year"></button>
+
+              <button class="tasks-v2-icon-btn tasks-v2-icon-btn--light tv2-month-picker__nav" type="button" id="tasksV2YearNext" aria-label="Next year">
+                <i data-feather="chevron-right"></i>
+              </button>
+            </div>
+
+            <div class="tv2-month-picker__months" id="tasksV2MonthsGrid" aria-label="Months"></div>
+
+            <button class="tv2-month-picker__cancel" type="button" data-close>Cancel</button>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    // Sidebar toggle for the custom header hamburger
+    document.addEventListener('DOMContentLoaded', () => {
+      const btn = document.getElementById('tasksV2MenuBtn');
+      if (!btn) return;
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        document.body.classList.toggle('sidebar-collapsed');
+      });
+    });
+  </script>
+
+  <script>feather.replace();</script>
+  <script src="/js/common-ui.js"></script>
+  <script src="/js/tasks-v2.js"></script>
+</body>
+</html>
